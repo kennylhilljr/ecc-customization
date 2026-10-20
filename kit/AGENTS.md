@@ -32,6 +32,8 @@ The skills live in the repository at `.agents/skills/` (Codex and Gemini read th
 | Before your handoff (self-review), and when reviewing | `review-change` | `/code-review`, then the skill's checklist | `codex review --base main`, then `$review-change` | the skill (plus the `code-review` extension if installed) |
 | High-risk units (the `high_risk_paths` in `.orchestration/config.yaml`) | `security-review` | `/security-review`, then the skill | `$security-review` | the skill (plus `/security:analyze` if installed) |
 
+**Codex and many skills.** When Codex has more skills installed than its skills budget allows (the ECC plugin adds hundreds), it drops the descriptions and may not list these at all. Do not rely on `$name` alone: open `.agents/skills/<name>/SKILL.md` and follow it.
+
 **When Claude Code's own skills are not available.** Codex and Gemini have no built-in simplify, verify or run, so the repository skills carry those steps for them. In addition, when a unit is written by any agent other than Claude Code, ECC runs a **Claude skills pass** after the author's attempt and before the gates: a fresh Claude Code session in the unit's worktree runs `/simplify`, `/verify` and `/code-review` (and `/security-review` for high-risk units) with these skills, and commits any fixes within the unit's scope. Outside ECC, run the same pass by hand before handing off:
 
 ```sh
