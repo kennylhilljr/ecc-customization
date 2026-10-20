@@ -1,0 +1,12 @@
+#!/bin/sh
+# ecc-kit new REPO --name NAME [options]   make a repository ECC-ready
+# ecc-kit diff REPO                        how the project's practices differ from the kit
+# ecc-kit sync REPO                        bring kit improvements into files the project never changed
+# Options for new: --slug --spec --prd --test-plan --setup --test-cmd --gate
+#   --fast-gate --milestone --run-id --force   (python3 lib/ecctools.py kit-new --help)
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cmd=${1:-}; [ $# -gt 0 ] && shift
+case "$cmd" in
+  new|diff|sync) exec python3 "$HERE/lib/ecctools.py" "kit-$cmd" "$@" ;;
+  *) sed -n '2,6p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

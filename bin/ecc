@@ -1,0 +1,43 @@
+#!/bin/sh
+# ecc [--project DIR] <command> [args...]
+#
+# The ECC orchestrator CLI for one project: nvm's default Node first on PATH,
+# provider keys from the Keychain (bin/with-keychain-secrets), and the
+# project's .orchestration/ecc.json. Without --project, the project is the
+# nearest folder at or above the current one that has .orchestration/ecc.json.
+#
+#   ecc status --run-id rm-m0a
+#   ecc --project ~/Documents/GitHub/research-mcp drive --run-id rm-m0a
+#
+# Put this folder on PATH (bootstrap.sh prints how) or alias it.
+set -u
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+. "$HERE/stack.conf"
+ORCH="$GITHUB_DIR/$ORCH_REPO"
+
+PROJECT=""
+if [ "${1:-}" = "--project" ]; then PROJECT="${2:-}"; shift 2 || exit 2; fi
+if [ -z "$PROJECT" ]; then
+  d=$(pwd)
+  while [ "$d" != "/" ]; do
+    [ -f "$d/.orchestration/ecc.json" ] && { PROJECT="$d"; break; }
+    d=$(dirname "$d")
+  done
+fi
+[ -n "$PROJECT" ] && [ -f "$PROJECT/.orchestration/ecc.json" ] || {
+  echo "ecc: no .orchestration/ecc.json here or above; pass --project DIR" >&2; exit 2; }
+[ $# -gt 0 ] || { echo "usage: ecc [--project DIR] <command> [args...]" >&2; exit 2; }
+
+NVM_DIR=${NVM_DIR:-"$HOME/.nvm"}
+if [ -r "$NVM_DIR/alias/default" ]; then
+  want=$(cat "$NVM_DIR/alias/default")
+  for dir in "$NVM_DIR"/versions/node/v"${want#v}"*; do
+    [ -x "$dir/bin/node" ] && PATH="$dir/bin:$PATH"
+  done
+  export PATH
+fi
+
+if [ "$(uname -s)" = "Darwin" ]; then
+  exec "$ORCH/bin/with-keychain-secrets" "$ORCH/bin/ecc" "$@" --config "$PROJECT/.orchestration/ecc.json"
+fi
+exec "$ORCH/bin/ecc" "$@" --config "$PROJECT/.orchestration/ecc.json"

@@ -1,0 +1,30 @@
+#!/bin/sh
+# ecc-snapshot [--openclaw]
+#
+# Back up this machine's ECC customizations into the repository's machine/
+# folder, with every secret-looking value removed (and refused outright if
+# anything secret-shaped is left): Claude Code, Codex and Gemini user
+# settings and instruction files, user-level skills, agents and commands,
+# and the plugins and marketplaces installed in each harness. bootstrap.sh
+# restores them on another machine.
+#
+# --openclaw also writes a full, verified OpenClaw state backup (sessions,
+# devices, credentials) with agent-platform into BACKUP_DIR from stack.conf.
+# That archive holds secrets: it stays local and never goes into Git. Carry
+# it to the new machine yourself and pass it to bootstrap.sh --openclaw-archive.
+#
+# Review `git diff machine/` before committing.
+set -eu
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+. "$HERE/stack.conf"
+NVM_DIR=${NVM_DIR:-"$HOME/.nvm"}
+[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" >/dev/null 2>&1 && nvm use default >/dev/null 2>&1 || true
+
+python3 "$HERE/lib/ecctools.py" snapshot --root "$HERE/machine"
+
+if [ "${1:-}" = "--openclaw" ]; then
+  mkdir -p "$BACKUP_DIR" && chmod 700 "$BACKUP_DIR"
+  "$GITHUB_DIR/$INFRA_REPO/bin/agent-platform" backup --backup-dir "$BACKUP_DIR" --json
+fi
+echo
+echo "Next: review with  git -C \"$HERE\" diff --stat machine/  then commit and push."

@@ -1,0 +1,54 @@
+{
+  "schema_version": "2.0",
+  "merge_approval": "agents",
+  "handoff_repair_turns": 1,
+  "preflight": "required",
+  "share_cap": 0.4,
+  "roles": {
+    "pr_reviewer": {
+      "panels": {
+        "economical": ["gemini", "codex", "claude"],
+        "standard": ["gemini", "codex", "claude"],
+        "advanced": ["codex", "gemini", "claude"]
+      }
+    },
+    "security_reviewer": {
+      "panel": ["codex", "gemini", "claude"]
+    },
+    "architect": {
+      "contract_paths": [],
+      "panel": ["gemini", "codex", "claude"]
+    },
+    "designer": {
+      "when_paths": []
+    },
+    "delivery_lead": {
+      "class": "standard",
+      "panel": ["gemini", "codex", "claude"]
+    },
+    "product_owner": {
+      "panel": ["gemini", "codex", "claude"]
+    }
+  },
+  "milestone": {
+    "name": "{{MILESTONE}}",
+    "docs": [
+      {"path": "{{SPEC}}", "sections": ["0"]},
+      {"path": "{{PRD}}", "sections": []},
+      {"path": "{{TEST_PLAN}}", "sections": []}
+    ],
+    "gate_commands": [
+      "{{GATE_CMD}}"
+    ]
+  },
+  "skills_pass": {
+    "runner": "claude",
+    "class": "standard",
+    "timeout_minutes": 30
+  },
+  "learning": {
+    "gate_commands": [
+      "{{FAST_GATE_CMD}}"
+    ]
+  }
+}

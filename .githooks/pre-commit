@@ -1,0 +1,17 @@
+#!/bin/sh
+# Refuse a commit that stages anything secret-shaped (bootstrap.sh turns this
+# hook on with core.hooksPath). Findings name the file and line, never the value.
+HERE=$(git rev-parse --show-toplevel)
+files=$(git diff --cached --name-only --diff-filter=ACM)
+[ -n "$files" ] || exit 0
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp" "$tmp.out"' EXIT
+for f in $files; do
+  mkdir -p "$tmp/$(dirname "$f")"
+  git show ":$f" > "$tmp/$f" 2>/dev/null || true
+done
+if ! python3 "$HERE/lib/ecctools.py" scan "$tmp" > "$tmp.out"; then
+  sed "s#$tmp/##" "$tmp.out" >&2
+  echo "pre-commit: refused; remove the values above (they are never printed)." >&2
+  exit 1
+fi

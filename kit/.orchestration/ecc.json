@@ -1,0 +1,14 @@
+{
+  "repo": "{{REPO}}",
+  "target_branch": "main",
+  "certifications": "{{RUNTIME_DIR}}/.orchestration/runtime/cert-latest.json",
+  "repo_checks": {
+    "required": [
+      "unit-tests"
+    ],
+    "commands": {
+      "unit-tests": "{{TEST_CMD}}"
+    }
+  },
+  "catalog": "{{STATE_DIR}}/catalog-latest.json"
+}
