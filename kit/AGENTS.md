@@ -29,7 +29,7 @@ The skills live in the repository at `.agents/skills/` (Codex and Gemini read th
 | While developing anything you can run | `run-{{SLUG}}` | `/run`, following the skill | `$run-{{SLUG}}` | ask for the run-{{SLUG}} skill |
 | After the change works, before verifying | `simplify-change` | `/simplify` | `$simplify-change` | ask for the simplify-change skill |
 | After the acceptance commands and `{{FAST_GATE_CMD}}` pass | `verify-change` | `/verify`, following the skill | `$verify-change` | ask for the verify-change skill |
-| Before your handoff (self-review), and when reviewing | `review-change` | `/code-review`, then the skill's checklist | `codex review --base main`, then `$review-change` | the skill (plus the `code-review` extension if installed) |
+| Before your handoff (self-review), and when reviewing | `review-change` | `/code-review`, then the skill's checklist | `$review-change` | the skill (plus the `code-review` extension if installed) |
 | High-risk units (the `high_risk_paths` in `.orchestration/config.yaml`) | `security-review` | `/security-review`, then the skill | `$security-review` | the skill (plus `/security:analyze` if installed) |
 
 **Codex and many skills.** When Codex has more skills installed than its skills budget allows (the ECC plugin adds hundreds), it drops the descriptions and may not list these at all. Do not rely on `$name` alone: open `.agents/skills/<name>/SKILL.md` and follow it.
@@ -52,6 +52,7 @@ The team's practices evolve during a build (TEAM-DELIVERY v7). Every reviewer, t
 - Every change needs tests.
 - Keep `{{FAST_GATE_CMD}}` green.
 - Do not use em dashes or en dashes in prose, comments or UI text.
+- Never start another agent CLI (`codex`, `claude`, `gemini`) inside a unit, including `codex review`: the unit sandbox cannot run it, and ECC's reviewers review every unit.
 - Never run `git push`, `security`, `launchctl` or anything that changes the machine outside this repository.
 <!-- Project rules: add them here (read-only neighbours, layering rules, forbidden imports). -->
 
