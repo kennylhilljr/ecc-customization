@@ -41,8 +41,9 @@ flowchart LR
 | [machine/](machine/README.md) | Snapshot destination; currently documentation only, with no captured manifest |
 | [.githooks/pre-commit](.githooks/pre-commit) | Scans staged file contents for secret-shaped strings |
 | [docs/REDEPLOY.md](docs/REDEPLOY.md) | Migration procedure, owner tasks and recovery notes |
+| [AGENTS.md](AGENTS.md), [CLAUDE.md](CLAUDE.md) | Instructions for coding agents working on this repository |
 
-`kit/AGENTS.md` is a template for generated projects. Its branch policy and example gates describe those projects; they do not establish tests or CI for this repository. The file named `kit/.orchestration/config.yaml` currently contains JSON syntax.
+`kit/AGENTS.md` is a template for generated projects. Its branch policy and example gates describe those projects; they do not establish tests or CI for this repository. The root `AGENTS.md` is the agent guidance for this repository. The file named `kit/.orchestration/config.yaml` currently contains JSON syntax.
 
 ## Dependencies and installation
 
