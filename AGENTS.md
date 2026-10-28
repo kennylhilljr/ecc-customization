@@ -20,7 +20,7 @@ There is no test suite, CI workflow, bats setup or shellcheck config. Run these 
 ```sh
 bash -n bootstrap.sh stack.conf
 sh -n bin/ecc bin/ecc-kit bin/ecc-snapshot .githooks/pre-commit
-python3 -m py_compile lib/ecctools.py
+python3 -c "import ast; ast.parse(open('lib/ecctools.py').read())"
 python3 lib/ecctools.py --help
 bin/ecc-kit new --help
 ./bootstrap.sh --help
