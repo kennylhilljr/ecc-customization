@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="360" viewBox="0 0 1280 360" role="img" aria-labelledby="title desc">
+  <title id="title">ECC Customization</title>
+  <desc id="desc">A midnight blue banner with a connected modular stack in mint, blue and violet. Configure, scaffold, redeploy.</desc>
+  <defs>
+    <linearGradient id="bg" x2="1" y2="1"><stop stop-color="#0b1224"/><stop offset="1" stop-color="#182642"/></linearGradient>
+    <linearGradient id="accent"><stop stop-color="#6ee7b7"/><stop offset="1" stop-color="#93c5fd"/></linearGradient>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse"><path d="M32 0H0V32" fill="none" stroke="#8ba6cf" stroke-opacity=".07"/></pattern>
+  </defs>
+  <rect width="1280" height="360" rx="24" fill="url(#bg)"/>
+  <rect width="1280" height="360" rx="24" fill="url(#grid)"/>
+  <path d="M56 68H120" stroke="url(#accent)" stroke-width="5" stroke-linecap="round"/>
+  <g font-family="Inter, ui-sans-serif, system-ui, sans-serif">
+    <text x="56" y="111" fill="#9cb1cf" font-size="14" font-weight="600" letter-spacing="4">THE SHARED SETUP LAYER</text>
+    <text x="52" y="181" fill="#f3f7ff" font-size="58" font-weight="750" letter-spacing="-2">ECC Customization</text>
+    <text x="56" y="226" fill="#c1cfe4" font-size="22">One toolkit. Consistent project foundations.</text>
+    <text x="56" y="294" fill="#6ee7b7" font-size="14" font-weight="600" letter-spacing="2">CONFIGURE</text>
+    <circle cx="182" cy="289" r="3" fill="#627b9f"/>
+    <text x="204" y="294" fill="#93c5fd" font-size="14" font-weight="600" letter-spacing="2">SCAFFOLD</text>
+    <circle cx="319" cy="289" r="3" fill="#627b9f"/>
+    <text x="341" y="294" fill="#c4b5fd" font-size="14" font-weight="600" letter-spacing="2">REDEPLOY</text>
+  </g>
+  <g transform="translate(940 70)" fill="none" stroke-linejoin="round">
+    <circle cx="100" cy="110" r="134" stroke="#6b8bb7" stroke-opacity=".15" stroke-dasharray="4 12"/>
+    <path d="M0 160L100 214L200 160V134L100 188L0 134Z" fill="#202b50" stroke="#a78bfa" stroke-width="2"/>
+    <path d="M0 134L100 80L200 134L100 188Z" fill="#25365a" stroke="#a78bfa" stroke-width="2"/>
+    <path d="M0 106L100 160L200 106V80L100 134L0 80Z" fill="#193a54" stroke="#60a5fa" stroke-width="2"/>
+    <path d="M0 80L100 26L200 80L100 134Z" fill="#1b3d59" stroke="#60a5fa" stroke-width="2"/>
+    <path d="M0 52L100 106L200 52V26L100 80L0 26Z" fill="#15434c" stroke="#6ee7b7" stroke-width="2"/>
+    <path d="M0 26L100 -28L200 26L100 80Z" fill="#1c4b52" stroke="#6ee7b7" stroke-width="2"/>
+    <path d="M72 25L92 14M72 25L92 36M128 25L108 14M128 25L108 36" stroke="#c1fff0" stroke-width="3" stroke-linecap="round"/>
+    <path d="M100 214V238H242V106H200" stroke="#6985ae" stroke-width="2"/>
+    <circle cx="242" cy="106" r="5" fill="#93c5fd"/>
+  </g>
+</svg>
