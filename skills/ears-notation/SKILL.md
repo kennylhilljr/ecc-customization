@@ -1,5 +1,5 @@
 ---
-name: EARS Notation
+name: ears-notation
 description: This skill should be used when the user asks about "EARS syntax", "EARS notation", "acceptance criteria format", "SHALL patterns", "formal requirements", "WHEN THE SHALL", or needs guidance on writing testable requirements using EARS (Easy Approach to Requirements Syntax).
 version: 1.0.0
 ---
