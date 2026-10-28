@@ -50,6 +50,22 @@ The full bootstrap targets **macOS**, with Xcode command line tools and an inter
 
 The Python helper uses **Python 3.9 or newer and the standard library only**. There is no Python dependency installation or package manifest here. Its local help and scan commands can run without installing the macOS stack; that does not establish full cross-platform support.
 
+### Safe evaluation outside macOS
+
+On Linux or in Codex Cloud, limit evaluation to the non-mutating syntax, help and scan commands below:
+
+```sh
+bash -n bootstrap.sh stack.conf
+sh -n bin/ecc bin/ecc-kit bin/ecc-snapshot .githooks/pre-commit
+python3 lib/ecctools.py --help
+python3 lib/ecctools.py kit-new --help
+bin/ecc-kit new --help
+./bootstrap.sh --help
+python3 lib/ecctools.py scan README.md stack.conf docs
+```
+
+Do not run the bootstrap there. `ECC_BOOTSTRAP_ANY_OS=1` bypasses only its operating-system guard; it does **not** make Homebrew, Keychain, launchd or any other macOS bootstrap step portable.
+
 Current values in `stack.conf`:
 
 | Component | Configuration |
