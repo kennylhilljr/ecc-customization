@@ -24,7 +24,7 @@
 #
 # Steps, in order:
 #   prereqs brew node clis repos runtime ecc skills shell machine openclaw
-#   secrets launchd verify
+#   ops secrets launchd verify
 set -u
 
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
@@ -32,7 +32,7 @@ HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "$HERE/stack.conf"
 LIB="$HERE/lib/ecctools.py"
 
-ALL_STEPS="prereqs brew node clis repos runtime ecc skills shell machine openclaw secrets launchd verify"
+ALL_STEPS="prereqs brew node clis repos runtime ecc skills shell machine openclaw ops secrets launchd verify"
 DRY=0; YES=0; ONLY=""; SKIP=""; OC_ARCHIVE=""; LAUNCHD=1; CERTIFY=1; OVERWRITE=0
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -290,6 +290,62 @@ s_openclaw() {
   run py "$LIB" openclaw-plugin --plugin-dir "$plugin" --state-dir "$ECC_STATE_DIR" \
     && ok "ecc-orchestrator plugin registered" \
     || owner "register the plugin by hand: $ORCH_REPO/integrations/openclaw-plugin/README.md"
+}
+
+s_ops() {
+  step "ops: OpenClaw ops agent settings and the openclaw-gh-app-token command"
+  # 1. openclaw-gh-app-token into ~/.local/bin with the App ids from stack.conf.
+  #    The repository copy reads stack.conf itself, so it gives the same result
+  #    when the shell step's PATH entry finds it first.
+  src="$HERE/bin/openclaw-gh-app-token"; bindir="$HOME/.local/bin"; dest="$bindir/openclaw-gh-app-token"
+  case "${OPENCLAW_OPS_APP_ID:-}:${OPENCLAW_OPS_INSTALLATION_ID:-}" in
+    *[!0-9:]*|:*|*:) warn "OPENCLAW_OPS_APP_ID and OPENCLAW_OPS_INSTALLATION_ID in stack.conf must be numbers; token command not installed" ;;
+    *)
+      rendered=$(sed -e "s#__OPENCLAW_OPS_APP_ID__#$OPENCLAW_OPS_APP_ID#g" \
+        -e "s#__OPENCLAW_OPS_INSTALLATION_ID__#$OPENCLAW_OPS_INSTALLATION_ID#g" "$src")
+      if [ -f "$dest" ] && [ "$(cat "$dest")" = "$rendered" ]; then
+        say "   $dest: up to date"
+      elif [ $DRY -eq 1 ]; then
+        say "   + install $dest (App $OPENCLAW_OPS_APP_ID, installation $OPENCLAW_OPS_INSTALLATION_ID)"
+      elif [ -e "$dest" ] && ! confirm "Replace $dest with this repository's version (the old one is kept as .ecc-backup)?"; then
+        owner "$dest differs from bin/openclaw-gh-app-token; rerun with --only ops --yes to replace it"
+      else
+        [ -e "$dest" ] && cp -p "$dest" "$dest.ecc-backup"
+        if mkdir -p "$bindir" && printf '%s\n' "$rendered" > "$dest.ecc-tmp" \
+          && chmod 755 "$dest.ecc-tmp" && mv -f "$dest.ecc-tmp" "$dest"; then
+          ok "installed $dest"
+        else
+          warn "could not install $dest"
+        fi
+      fi
+      case ":$PATH:" in *":$bindir:"*) ;; *) owner "add $bindir to PATH in ~/.zshrc so openclaw-gh-app-token is found" ;; esac
+      ;;
+  esac
+
+  # 2. The ops agent's own Claude Code settings: GateGuard exemptions and sandbox
+  #    writes to the git folders under GITHUB_DIR. Only the keys in the tracked
+  #    file are touched; ecctools honors --dry-run itself.
+  ws="${OPENCLAW_STATE_DIR:-$HOME/.openclaw}/workspace-ops"
+  if [ -d "$ws" ] || [ $DRY -eq 1 ]; then
+    dryflag=""; [ $DRY -eq 1 ] && dryflag="--dry-run"
+    # shellcheck disable=SC2086
+    if py "$LIB" merge-settings --source "$HERE/machine/ops/workspace-ops.settings.json" \
+      --target "$ws/.claude/settings.json" --home "$HOME" --github-dir "$GITHUB_DIR" $dryflag; then
+      ok "ops agent settings in $ws/.claude/settings.json"
+    else
+      warn "ops settings not merged (see above); $ws/.claude/settings.json left as is"
+    fi
+  else
+    owner "no OpenClaw ops workspace at $ws yet; set up OpenClaw, then rerun bootstrap.sh --only ops"
+  fi
+
+  # 3. The App private key: Keychain only, never a file.
+  [ "$(uname -s)" = "Darwin" ] || return 0
+  if security find-generic-password -a "$USER" -s openclaw-ops-assist/private-key >/dev/null 2>&1; then
+    say "   openclaw-ops-assist/private-key: present"
+  else
+    owner "store the openclaw-ops-assist App key (base64 of the downloaded .pem): base64 -i <file>.pem | pbcopy; security add-generic-password -a \"\$USER\" -s openclaw-ops-assist/private-key -U -w   (paste at the hidden prompt, then delete the .pem)"
+  fi
 }
 
 s_secrets() {

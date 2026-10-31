@@ -1,0 +1,17 @@
+{
+  "env": {
+    "GATEGUARD_BASH_ROUTINE_DISABLED": "1",
+    "GATEGUARD_EXEMPT_GLOBS": "docs/**,**/*.md,tests/**,__GITHUB_DIR__/*/docs/**,__GITHUB_DIR__/**/*.md,__GITHUB_DIR__/*/tests/**"
+  },
+  "sandbox": {
+    "filesystem": {
+      "allowWrite": [
+        "__GITHUB_DIR__/*/.git",
+        "__GITHUB_DIR__/*/.git/**"
+      ],
+      "denyWrite": [
+        "__GITHUB_DIR__/*/.git/hooks"
+      ]
+    }
+  }
+}

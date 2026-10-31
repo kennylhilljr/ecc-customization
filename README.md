@@ -35,10 +35,13 @@ flowchart LR
 | [bin/ecc](bin/ecc) | Finds a project's configuration and delegates to the external orchestrator |
 | [bin/ecc-kit](bin/ecc-kit) | Creates, compares and syncs project templates |
 | [bin/ecc-snapshot](bin/ecc-snapshot) | Captures selected user settings; optionally invokes the external OpenClaw backup tool |
+| [bin/openclaw-gh-app-token](bin/openclaw-gh-app-token) | Prints a GitHub installation token for the `openclaw-ops-assist` App (bash) |
+| [machine/ops/](machine/ops/workspace-ops.settings.json) | Tracked Claude Code settings for the OpenClaw ops agent, merged by the `ops` step |
+| [tests/](tests/) | `unittest` tests for the `ops` step, the settings merge and the token command |
 | [lib/ecctools.py](lib/ecctools.py) | Python helpers for templates, snapshots, restores, plugin registration and secret scanning |
 | [kit/](kit/) | Agent instructions, build/review skills, lessons ledger and orchestration templates |
 | [skills/](skills/README.md) | Shared ECC operation, EARS notation and product requirements skills; SDD reference documents |
-| [machine/](machine/README.md) | Snapshot destination; currently documentation only, with no captured manifest |
+| [machine/](machine/README.md) | Snapshot destination (no captured manifest yet), plus the hand-maintained `machine/ops/` settings |
 | [.githooks/pre-commit](.githooks/pre-commit) | Scans staged file contents for secret-shaped strings |
 | [docs/REDEPLOY.md](docs/REDEPLOY.md) | Migration procedure, owner tasks and recovery notes |
 | [AGENTS.md](AGENTS.md), [CLAUDE.md](CLAUDE.md) | Instructions for coding agents working on this repository |
@@ -98,7 +101,7 @@ On the target Mac, review `stack.conf` and preview the steps:
 ./bootstrap.sh
 ```
 
-Bootstrap runs `prereqs`, `brew`, `node`, `clis`, `repos`, `runtime`, `ecc`, `skills`, `shell`, `machine`, `openclaw`, `secrets`, `launchd`, then `verify`. These install the toolchain and CLIs, clone configured repositories, create a detached runtime worktree outside Documents, link skills, add `bin/` to the zsh PATH, restore any snapshot, configure OpenClaw, offer Keychain entry, install background agents and check configured projects.
+Bootstrap runs `prereqs`, `brew`, `node`, `clis`, `repos`, `runtime`, `ecc`, `skills`, `shell`, `machine`, `openclaw`, `ops`, `secrets`, `launchd`, then `verify`. These install the toolchain and CLIs, clone configured repositories, create a detached runtime worktree outside Documents, link skills, add `bin/` to the zsh PATH, restore any snapshot, configure OpenClaw, set up the OpenClaw ops agent, offer Keychain entry, install background agents and check configured projects.
 
 Finish the summary's owner tasks and rerun the relevant steps. Sign-ins include `gh auth login`, `claude auth login`, `codex login`, and Gemini's interactive sign-in when using an account. OpenClaw may need onboarding or `openclaw doctor` after restoration. Use an API key provider as directed by the redeployment guide.
 
@@ -115,6 +118,7 @@ A dry run previews actions but still reads configuration and probes local tools.
 | `PROJECT_REPOS` | Space-separated `research-mcp ctxd` |
 | `ECC_RUNTIME_DIR` | `~/.local/share/openclaw-ecc-orchestrator/runtime`; detached runtime worktree |
 | `ECC_STATE_DIR` | `~/.local/state/openclaw-ecc-orchestrator`; logs, catalog and plugin state |
+| `OPENCLAW_OPS_APP_ID`, `OPENCLAW_OPS_INSTALLATION_ID` | `5509685`, `176165995`; the `openclaw-ops-assist` GitHub App used by `openclaw-gh-app-token` |
 | `KEYCHAIN_SECRETS` | Service names only, with the current user as account; values are entered locally |
 | `BACKUP_DIR` | `~/AgentPlatformBackups`; credential-bearing OpenClaw backups outside Git |
 
@@ -141,6 +145,30 @@ Platform repository updates fast-forward only clean `main` checkouts. Despite th
 | `--no-certify` | Skip initial certification invocation in `verify` |
 | `--overwrite-config` | Replace differing snapshot-managed configs, keeping `.ecc-backup` copies |
 | `--openclaw-archive PATH` | Restore OpenClaw when its destination does not exist |
+
+### OpenClaw ops agent settings and GitHub App token
+
+The ops agent is Claude Code running in `~/.openclaw/workspace-ops` (under `OPENCLAW_STATE_DIR` when that is set). The `ops` step does three things:
+
+1. Installs `bin/openclaw-gh-app-token` as `~/.local/bin/openclaw-gh-app-token` with the two App ids from `stack.conf` written in. If a different file is already there, it asks first (or replaces it under `--yes`) and keeps the old one as `.ecc-backup`. The repository copy reads `stack.conf` on its own, so the `bin/` entry that the `shell` step puts first on PATH gives the same token.
+2. Merges [machine/ops/workspace-ops.settings.json](machine/ops/workspace-ops.settings.json) into `~/.openclaw/workspace-ops/.claude/settings.json`. The file sets `GATEGUARD_BASH_ROUTINE_DISABLED=1`, exempts first edits of `docs/**`, `**/*.md` and `tests/**` from GateGuard (relative to the workspace and to each repository under `GITHUB_DIR`), and lets sandboxed commands write the `.git` folders of the repositories under `GITHUB_DIR`, with `.git/hooks` still write-denied. GateGuard's destructive-command checks stay on. The merge owns only the keys in that file: their values are set, list entries are added when missing, and every other key is left alone. `__HOME__` and `__GITHUB_DIR__` are filled in with the real paths. A target that is not a JSON object, or that holds a different type at an owned key, is reported and left unchanged. A second run writes nothing.
+3. Checks the Keychain for `openclaw-ops-assist/private-key` and, when it is missing, prints how to store it. The value is the base64-encoded PEM that GitHub gave you; no key file is kept:
+
+```sh
+base64 -i ~/Downloads/openclaw-ops-assist.private-key.pem | pbcopy
+security add-generic-password -a "$USER" -s openclaw-ops-assist/private-key -U -w
+# paste at the hidden prompt, then delete the .pem file
+```
+
+Preview the merge without writing, or run the step alone:
+
+```sh
+./bootstrap.sh --only ops --dry-run
+./bootstrap.sh --only ops
+openclaw-gh-app-token --print-config     # ids only, no network
+```
+
+Two checks need the real machine and are not covered by the tests: once the key is stored, `GH_TOKEN="$(openclaw-gh-app-token)" gh api /installation/repositories` lists the installed repositories, and a sandboxed `git -C <repo> commit` run by the ops agent succeeds without a sandbox override.
 
 ### Scaffold a project
 
@@ -211,10 +239,11 @@ The Python restore refuses an existing destination and unsafe archive members. I
 
 ## Testing
 
-There is no checked-in automated test suite, CI workflow or coverage report. Run these local smoke checks from the repository root with Bash, a POSIX shell, Git and Python 3.9+:
+There is no CI workflow or coverage report. `tests/` holds `unittest` tests for the `ops` step, `merge-settings` and `openclaw-gh-app-token`; they use temporary home folders and fake `security` and `curl` commands, so they need neither the Keychain nor the network. Run them and the smoke checks from the repository root with Bash, a POSIX shell, Git, OpenSSL and Python 3.9+:
 
 ```sh
-bash -n bootstrap.sh stack.conf
+python3 -m unittest discover -s tests
+bash -n bootstrap.sh stack.conf bin/openclaw-gh-app-token
 sh -n bin/ecc bin/ecc-kit bin/ecc-snapshot .githooks/pre-commit
 python3 -m py_compile lib/ecctools.py
 python3 lib/ecctools.py --help

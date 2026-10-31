@@ -11,6 +11,8 @@ and a secret scan. Standard library only; Python 3.9 or newer.
     ecctools.py openclaw-restore --archive PATH --dest DIR
     ecctools.py openclaw-plugin --plugin-dir DIR --state-dir DIR
     ecctools.py scan PATH...
+    ecctools.py merge-settings --source FILE --target FILE [--home DIR]
+                               [--github-dir DIR] [--dry-run]
 
 Nothing here prints a secret value: findings name the file, the line and the
 kind of match, never the matched text.
@@ -606,6 +608,104 @@ def openclaw_plugin(plugin_dir, state_dir):
     return 0
 
 
+# ------------------------------------------------------------------ settings merge
+class MergeError(Exception):
+    pass
+
+
+def _render_placeholders(value, subs):
+    """Replace placeholder tokens in every string of a JSON value."""
+    if isinstance(value, dict):
+        return {k: _render_placeholders(v, subs) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_render_placeholders(v, subs) for v in value]
+    if isinstance(value, str):
+        for token, real in subs.items():
+            value = value.replace(token, real)
+        return value
+    return value
+
+
+def _merge_owned(target, source, path, changes):
+    """Merge source into target in place. Source keys are owned: a scalar is
+    set to the source value, a list gains the source entries it lacks, a dict
+    is merged recursively. Keys only in target are never touched."""
+    for key, want in source.items():
+        where = f"{path}.{key}" if path else key
+        if key not in target:
+            target[key] = want
+            changes.append(f"add {where}")
+            continue
+        have = target[key]
+        if isinstance(want, dict):
+            if not isinstance(have, dict):
+                raise MergeError(f"{where} is not an object in the target")
+            _merge_owned(have, want, where, changes)
+        elif isinstance(want, list):
+            if not isinstance(have, list):
+                raise MergeError(f"{where} is not a list in the target")
+            for item in want:
+                if item not in have:
+                    have.append(item)
+                    changes.append(f"append to {where}")
+        elif isinstance(have, (dict, list)):
+            raise MergeError(f"{where} is a container in the target, a value in the source")
+        elif have != want:
+            target[key] = want
+            changes.append(f"set {where}")
+
+
+def merge_settings(source, target, subs, dry=False):
+    """Merge a tracked settings fragment into a JSON settings file, owning only
+    the fragment's keys. Writes nothing when the result is unchanged."""
+    try:
+        with open(source, encoding="utf-8") as fh:
+            fragment = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"merge-settings: cannot read {source}: {type(exc).__name__}", file=sys.stderr)
+        return 2
+    if not isinstance(fragment, dict):
+        print(f"merge-settings: {source} is not a JSON object", file=sys.stderr)
+        return 2
+    fragment = _render_placeholders(fragment, subs)
+    left = sorted(set(re.findall(r"__[A-Z_]+__", json.dumps(fragment))))
+    if left:
+        print(f"merge-settings: unfilled placeholders in {source}: {', '.join(left)}", file=sys.stderr)
+        return 2
+    current = {}
+    if os.path.exists(target):
+        try:
+            with open(target, encoding="utf-8") as fh:
+                current = json.load(fh)
+        except (OSError, ValueError) as exc:
+            print(f"merge-settings: {target} is not readable JSON ({type(exc).__name__}); left as is",
+                  file=sys.stderr)
+            return 2
+        if not isinstance(current, dict):
+            print(f"merge-settings: {target} is not a JSON object; left as is", file=sys.stderr)
+            return 2
+    changes = []
+    try:
+        _merge_owned(current, fragment, "", changes)
+    except MergeError as exc:
+        print(f"merge-settings: {exc}; {target} left as is", file=sys.stderr)
+        return 2
+    if not changes:
+        print(f"   {target}: already up to date")
+        return 0
+    for c in changes:
+        print(f"   {'would ' if dry else ''}{c}")
+    if dry:
+        return 0
+    os.makedirs(os.path.dirname(target), exist_ok=True)
+    tmp = f"{target}.ecc-tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps(current, indent=2) + "\n")
+    os.replace(tmp, target)
+    print(f"   updated {target}")
+    return 0
+
+
 # ------------------------------------------------------------------ kit
 KIT_VARS = ["NAME", "SLUG", "REPO", "SPEC", "PRD", "TEST_PLAN", "SETUP_CMD", "TEST_CMD",
             "GATE_CMD", "FAST_GATE_CMD", "MILESTONE", "MILESTONE_LC", "RUN_ID",
@@ -799,6 +899,12 @@ def main(argv=None):
     op.add_argument("--state-dir", required=True)
     sc = sub.add_parser("scan")
     sc.add_argument("paths", nargs="+")
+    ms = sub.add_parser("merge-settings")
+    ms.add_argument("--source", required=True)
+    ms.add_argument("--target", required=True)
+    ms.add_argument("--home", default=os.path.expanduser("~"))
+    ms.add_argument("--github-dir")
+    ms.add_argument("--dry-run", action="store_true")
     a = p.parse_args(argv)
 
     if a.cmd == "kit-new":
@@ -820,6 +926,11 @@ def main(argv=None):
         for path, n, kind in hits:
             print(f"{path}:{n}: looks like a {kind}")
         return 1 if hits else 0
+    if a.cmd == "merge-settings":
+        home = os.path.abspath(a.home)
+        github_dir = os.path.abspath(a.github_dir or os.path.join(home, "Documents", "GitHub"))
+        subs = {"__GITHUB_DIR__": github_dir, HOME_TOKEN: home}
+        return merge_settings(a.source, os.path.abspath(a.target), subs, a.dry_run)
     return 2
 
 
