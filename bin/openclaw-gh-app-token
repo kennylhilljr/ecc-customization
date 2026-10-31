@@ -1,0 +1,75 @@
+#!/bin/bash
+# openclaw-gh-app-token: print a GitHub installation token (valid for one hour) for the
+# openclaw-ops-assist GitHub App, so gh and git act as openclaw-ops-assist[bot]:
+#   GH_TOKEN="$(openclaw-gh-app-token)" gh issue create -R OWNER/REPO --title ... --body ...
+#   openclaw-gh-app-token --print-config   (show the App and installation ids, no network)
+# The private key is read from the login Keychain (service openclaw-ops-assist/private-key,
+# stored base64-encoded) and passed to openssl through a pipe; it is never written to disk.
+#
+# The ids come from, in order: OPENCLAW_OPS_APP_ID and OPENCLAW_OPS_INSTALLATION_ID in the
+# environment; the values bootstrap.sh writes into the installed copy in ~/.local/bin; the
+# stack.conf of the ecc-customization checkout this file sits in.
+set -euo pipefail
+
+SERVICE=openclaw-ops-assist/private-key
+BAKED_APP_ID="__OPENCLAW_OPS_APP_ID__"
+BAKED_INSTALLATION_ID="__OPENCLAW_OPS_INSTALLATION_ID__"
+
+fail() { printf 'openclaw-gh-app-token: %s\n' "$*" >&2; exit 1; }
+
+# A value bootstrap.sh did not fill in still has the __NAME__ shape.
+baked() { case "$1" in __*__) printf '' ;; *) printf '%s' "$1" ;; esac; }
+
+conf="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../stack.conf"
+
+APP_ID="${OPENCLAW_OPS_APP_ID:-$(baked "$BAKED_APP_ID")}"
+INSTALLATION_ID="${OPENCLAW_OPS_INSTALLATION_ID:-$(baked "$BAKED_INSTALLATION_ID")}"
+if [ -f "$conf" ]; then
+  # shellcheck disable=SC1090
+  [ -n "$APP_ID" ] || APP_ID="$(. "$conf" >/dev/null 2>&1; printf '%s' "${OPENCLAW_OPS_APP_ID:-}")"
+  # shellcheck disable=SC1090
+  [ -n "$INSTALLATION_ID" ] || INSTALLATION_ID="$(. "$conf" >/dev/null 2>&1; printf '%s' "${OPENCLAW_OPS_INSTALLATION_ID:-}")"
+fi
+case "$APP_ID" in ''|*[!0-9]*) fail "no numeric App id (set OPENCLAW_OPS_APP_ID in stack.conf and rerun bootstrap.sh --only ops)" ;; esac
+case "$INSTALLATION_ID" in ''|*[!0-9]*) fail "no numeric installation id (set OPENCLAW_OPS_INSTALLATION_ID in stack.conf and rerun bootstrap.sh --only ops)" ;; esac
+
+if [ "${1:-}" = "--print-config" ]; then
+  printf 'app_id=%s\ninstallation_id=%s\nkeychain_service=%s\n' "$APP_ID" "$INSTALLATION_ID" "$SERVICE"
+  exit 0
+fi
+
+if ! key_b64=$(security find-generic-password -a "$USER" -s "$SERVICE" -w 2>/dev/null) || [ -z "$key_b64" ]; then
+  printf 'openclaw-gh-app-token: Keychain item %s is missing. Store the App private key with:\n' "$SERVICE" >&2
+  printf '  base64 -i <the downloaded .pem file> | pbcopy\n' >&2
+  # shellcheck disable=SC2016
+  printf '  security add-generic-password -a "$USER" -s %s -U -w\n' "$SERVICE" >&2
+  printf '(paste at the hidden prompt, then delete the .pem file)\n' >&2
+  exit 1
+fi
+
+b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+
+now=$(date +%s)
+header=$(printf '{"alg":"RS256","typ":"JWT"}' | b64url)
+payload=$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' $((now - 60)) $((now + 540)) "$APP_ID" | b64url)
+signature=$(printf '%s.%s' "$header" "$payload" \
+  | openssl dgst -sha256 -sign <(printf '%s' "$key_b64" | base64 -d) 2>/dev/null \
+  | b64url) || fail "could not sign the JWT (is the Keychain value a base64-encoded PEM private key?)"
+[ -n "$signature" ] || fail "could not sign the JWT (is the Keychain value a base64-encoded PEM private key?)"
+
+reply=$(curl -fsS -X POST \
+  -H "Authorization: Bearer $header.$payload.$signature" \
+  -H "Accept: application/vnd.github+json" \
+  -H "X-GitHub-Api-Version: 2022-11-28" \
+  "https://api.github.com/app/installations/$INSTALLATION_ID/access_tokens") \
+  || fail "GitHub refused the token request for installation $INSTALLATION_ID"
+
+printf '%s' "$reply" | python3 -c '
+import json, sys
+try:
+    token = json.load(sys.stdin).get("token")
+except ValueError:
+    token = None
+if not isinstance(token, str) or not token:
+    sys.exit("openclaw-gh-app-token: the GitHub reply has no token")
+print(token)'
