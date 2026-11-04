@@ -13,6 +13,7 @@ import tempfile
 import time
 import unittest
 import urllib.parse
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -26,6 +27,7 @@ API = "https://api.example.test"
 RECEIVED = "2026-11-04T01:02:03.123Z"
 IN_WINDOW = "2026-11-04T01:01:00Z"
 BEFORE_WINDOW = "2026-11-04T00:40:00Z"
+FMT = "%Y-%m-%dT%H:%M:%SZ"
 
 FAKE_TOKEN = """#!/bin/sh
 [ "${FAKE_TOKEN_EXIT:-0}" = 0 ] || exit "$FAKE_TOKEN_EXIT"
@@ -168,6 +170,9 @@ class DrainTest(unittest.TestCase):
             base = f"{self.agent_log}.%s.{pid}"
             runs.append((read(base % "argv").splitlines(), read(base % "msg"), read(base % "mode").strip()))
         return runs
+
+    def delivered(self, repo="octo/app"):
+        return list(self.load_state()["delivered"].get(repo, {}))
 
     def health_checks(self):
         p = f"{self.agent_log}.health"
@@ -313,7 +318,7 @@ class DrainTest(unittest.TestCase):
                                     "channel:C0CEMPH1L0N", "--timeout", "600"])
         self.assertFalse(os.path.exists(argv[4]))
         self.assertFalse(os.path.exists(os.path.dirname(argv[4])))
-        self.assertEqual(self.load_state()["repos"], {"octo/app": 105})
+        self.assertEqual(self.load_state()["delivered"], {"octo/app": {"issue_comment:105": {"time": IN_WINDOW}}})
         self.assertEqual(self.health_checks(), ["health --timeout 5000"])
         self.assertEqual(self.alerts(), [])
         self.assertEqual(os.stat(self.state).st_mode & 0o777, 0o600)
@@ -332,7 +337,7 @@ class DrainTest(unittest.TestCase):
         path = self.event()
         os.makedirs(self.state_dir)
         with open(self.state, "w") as fh:
-            json.dump({"repos": {"octo/app": 50}}, fh)
+            json.dump({"delivered": {"octo/app": {"issue_comment:40": {"time": IN_WINDOW}}}}, fh)
         routes = {"/repos/octo/app/issues/7/comments": [
             comment(101, login="kennylhilljr-evil"),
             comment(102, login="KennyLHillJr"),
@@ -346,7 +351,7 @@ class DrainTest(unittest.TestCase):
         self.assertEqual(code, 0, self.output)
         self.assertFalse(os.path.exists(path))
         self.assertEqual(self.agent_runs(), [])
-        self.assertEqual(self.load_state()["repos"], {"octo/app": 50})
+        self.assertEqual(self.delivered(), ["issue_comment:40"])
 
     def test_comments_delivered_oldest_first(self):
         self.event()
@@ -356,7 +361,7 @@ class DrainTest(unittest.TestCase):
         self.assertEqual(code, 0, self.output)
         self.assertEqual([m.rsplit("\n", 1)[1] for _, m, _ in self.agent_runs()],
                          ["@openclaw first", "@openclaw second"])
-        self.assertEqual(self.load_state()["repos"], {"octo/app": 120})
+        self.assertEqual(self.delivered(), ["issue_comment:110", "issue_comment:120"])
 
     def test_number_null_uses_repo_wide_endpoint(self):
         self.event(number=None)
@@ -394,7 +399,8 @@ class DrainTest(unittest.TestCase):
         msgs = [m for _, m, _ in self.agent_runs()]
         self.assertIn("On: octo/lib#2", msgs[0])
         self.assertIn("On: octo/app#1", msgs[1])
-        self.assertEqual(self.load_state()["repos"], {"octo/app": 150, "octo/lib": 140})
+        self.assertEqual(self.delivered("octo/app"), ["issue_comment:150"])
+        self.assertEqual(self.delivered("octo/lib"), ["issue_comment:140"])
 
     # ---- pull request sources
     def test_pull_request_review_comment_and_review_body(self):
@@ -422,7 +428,7 @@ class DrainTest(unittest.TestCase):
         self.assertIn("Comment: https://github.com/octo/app/pull/7#pullrequestreview-300\nOn: octo/app#7\n\n"
                       "@openclaw address these", msgs[2])
         state = self.load_state()
-        self.assertEqual(state["delivered"]["octo/app"],
+        self.assertEqual(list(state["delivered"]["octo/app"]),
                          ["issue_comment:300", "review_comment:300", "review:300"])
         self.assertEqual(state["pending"], {})
         # nothing is delivered twice
@@ -458,7 +464,8 @@ class DrainTest(unittest.TestCase):
         self.assertEqual(code, 0, self.output)
         (_, msg, _), = self.agent_runs()
         self.assertIn("#discussion_r320", msg)
-        self.assertEqual(self.load_state()["delivered"]["octo/app"], ["issue_comment:320", "review_comment:320"])
+        self.assertEqual(self.delivered(), ["issue_comment:320", "review_comment:320"])
+        self.assertNotIn("repos", self.load_state())
 
     def test_too_many_pages_defers(self):
         path = self.event()
@@ -528,7 +535,7 @@ class DrainTest(unittest.TestCase):
         self.assertEqual(len(self.agent_runs()), 2)
         state = self.load_state()
         self.assertEqual(state["pending"], {})
-        self.assertEqual(state["delivered"]["octo/app"], ["issue_comment:510"])
+        self.assertEqual(list(state["delivered"]["octo/app"]), ["issue_comment:510"])
 
     def test_retry_pending_dry_run_keeps_entry(self):
         self.event()
@@ -555,7 +562,7 @@ class DrainTest(unittest.TestCase):
             f"It was not resent. If nothing was posted, run: openclaw-gh-command-drain --retry-pending"]])
         state = self.load_state()
         self.assertEqual(list(state["pending"]["octo/app"]), ["issue_comment:530"])
-        self.assertNotIn("octo/app", state["repos"])
+        self.assertNotIn("octo/app", state["delivered"])
         name = os.path.basename(path)
         self.assertEqual(self.listing(self.deferred), [name])
         # the retry skips the pending comment, delivers the next one, and finishes the event
@@ -621,7 +628,7 @@ class DrainTest(unittest.TestCase):
         with open(os.path.join(self.deferred, name)) as fh:
             self.assertEqual(json.load(fh)["attempts"], 1)
         self.assertEqual(self.load_state()["pending"], {})
-        self.assertNotIn("octo/app", self.load_state()["repos"])
+        self.assertNotIn("octo/app", self.load_state()["delivered"])
         # a later command for the same repository goes first; the deferred one still gets its comments
         self.event()
         routes2 = {"/repos/octo/app/issues/7/comments": [comment(160), comment(161), comment(170)]}
@@ -632,7 +639,7 @@ class DrainTest(unittest.TestCase):
         code, _ = self.run_drain(routes=routes)
         self.assertEqual(code, 0, self.output)
         self.assertEqual(len(self.agent_runs()), 3)
-        self.assertEqual(self.load_state()["repos"], {"octo/app": 170})
+        self.assertEqual(self.delivered(), ["issue_comment:160", "issue_comment:161", "issue_comment:170"])
         self.assertEqual(self.listing(self.queue), [])
 
     # ---- gateway probe
@@ -665,6 +672,89 @@ class DrainTest(unittest.TestCase):
         self.assertEqual(code, 0, self.output)
         self.assertEqual(self.health_checks(), [])
 
+    # ---- dedupe by explicit keys only
+    def test_deferred_lower_id_on_another_issue_still_delivered(self):
+        """Codex review round 9: command comment 100 on issue A is deferred, then comment 105 on issue B
+        is delivered; retrying A must still deliver comment 100."""
+        a = self.event(number=1, name="a-command.json")
+        routes = {"/repos/octo/app/issues/1/comments": [comment(100, "@openclaw on A", number=1)],
+                  "/repos/octo/app/issues/2/comments": [comment(105, "@openclaw on B", number=2)]}
+
+        def agent_missing(argv, *args, **kw):
+            if argv[1:2] == ["agent"]:
+                raise FileNotFoundError(2, "No such file or directory")
+            return subprocess.run(argv, *args, **kw)
+        code, _ = self.run_drain(routes=routes, run=agent_missing)
+        self.assertEqual(code, 1)
+        self.assertEqual(self.listing(self.deferred), ["a-command.json"])
+        self.event(number=2, name="b-command.json")
+        code, _ = self.run_drain(routes=routes)
+        self.assertEqual(code, 0, self.output)
+        self.assertEqual(self.delivered(), ["issue_comment:105"])
+        os.replace(os.path.join(self.deferred, "a-command.json"), a)
+        code, _ = self.run_drain(routes=routes)
+        self.assertEqual(code, 0, self.output)
+        self.assertEqual([m.rsplit("\n", 1)[1] for _, m, _ in self.agent_runs()], ["@openclaw on B", "@openclaw on A"])
+        self.assertEqual(self.delivered(), ["issue_comment:105", "issue_comment:100"])
+        self.assertEqual(self.listing(self.queue), [])
+
+    def test_delivered_keys_pruned_after_seven_days(self):
+        os.makedirs(self.state_dir)
+        now = datetime.now(timezone.utc)
+        old, recent = (now - timedelta(days=8)).strftime(FMT), (now - timedelta(days=6)).strftime(FMT)
+        with open(self.state, "w") as fh:
+            json.dump({"repos": {"octo/app": 999},
+                       "delivered": {"octo/app": {"issue_comment:1": {"time": old},
+                                                  "issue_comment:2": {"time": recent},
+                                                  "review:3": {"time": None, "first_seen": old},
+                                                  "review:4": {"time": None, "first_seen": recent}},
+                                     "octo/lib": [5, "review_comment:6"]}}, fh)
+        self.event()
+        code, _ = self.run_drain(routes={"/repos/octo/app/issues/7/comments": [comment(700)]})
+        self.assertEqual(code, 0, self.output)
+        state = self.load_state()
+        self.assertNotIn("repos", state)
+        self.assertEqual(list(state["delivered"]["octo/app"]), ["issue_comment:2", "review:4", "issue_comment:700"])
+        lib = state["delivered"]["octo/lib"]
+        self.assertEqual(list(lib), ["issue_comment:5", "review_comment:6"])
+        for entry in lib.values():
+            self.assertIsNone(entry["time"])
+            self.assertLess(now - timedelta(minutes=1), drain.parse_time(entry["first_seen"]))
+
+    # ---- moving with a rewrite
+    def test_failed_deferral_write_leaves_source(self):
+        path = self.event()
+        with open(path) as fh:
+            before = fh.read()
+        os.makedirs(self.deferred)
+        os.chmod(self.deferred, 0o500)
+        try:
+            code, _ = self.run_drain(env={"FAKE_TOKEN_EXIT": "1"})
+            listing = os.listdir(self.deferred)
+        finally:
+            os.chmod(self.deferred, 0o700)
+        self.assertEqual(code, 1)
+        self.assertIn("could not move to", self.output)
+        with open(path) as fh:
+            self.assertEqual(fh.read(), before)
+        self.assertEqual(listing, [])
+
+    def test_move_into_rewrites_before_removing(self):
+        src = os.path.join(self.queue, "x.json")
+        with open(src, "w") as fh:
+            fh.write('{"attempts": 1}')
+        open(os.path.join(self.queue, "y.json"), "w").close()
+        dest = drain.Path(self.deferred)
+        os.makedirs(dest)
+        open(os.path.join(dest, "x.json"), "w").close()
+        target = drain.move_into(drain.Path(src), dest, {"attempts": 2})
+        self.assertEqual(os.path.basename(target), "x-1.json")
+        self.assertFalse(os.path.exists(src))
+        with open(target) as fh:
+            self.assertEqual(json.load(fh), {"attempts": 2})
+        self.assertEqual(os.stat(target).st_mode & 0o777, 0o600)
+        self.assertEqual(drain.move_into(drain.Path(os.path.join(self.queue, "y.json")), dest).name, "y.json")
+
     # ---- failures
     def test_partial_delivery_advances_only_delivered(self):
         self.event()
@@ -677,7 +767,7 @@ class DrainTest(unittest.TestCase):
         code, _ = self.run_drain(routes=routes)
         self.assertEqual(code, 1)
         state = self.load_state()
-        self.assertEqual(state["repos"], {"octo/app": 160})
+        self.assertEqual(list(state["delivered"]["octo/app"]), ["issue_comment:160"])
         self.assertEqual(list(state["pending"]["octo/app"]), ["issue_comment:161"])
         self.assertEqual(len(self.listing(self.deferred)), 1)
 
@@ -754,7 +844,7 @@ class DrainTest(unittest.TestCase):
         self.assertIn("malformed", self.output)
         corrupt = [n for n in os.listdir(self.state_dir) if n.startswith("state.json.corrupt-")]
         self.assertEqual(len(corrupt), 1)
-        self.assertEqual(self.load_state()["repos"], {"octo/app": 190})
+        self.assertEqual(self.delivered(), ["issue_comment:190"])
 
     def test_token_never_written(self):
         self.event()

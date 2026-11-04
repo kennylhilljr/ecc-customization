@@ -13,6 +13,10 @@ conversation comments, inline pull request review comments, and pull request
 review bodies (the last only when the event names a pull request; GitHub has
 no repository-wide list of reviews).
 
+A comment counts as delivered only when its own "<source>:<id>" key is in the
+state file; there is no id watermark. Keys are kept for 7 days, far longer
+than the 15 minute window that already excludes older comments.
+
 Before each `openclaw agent` run the drain records a pending entry for that
 comment in the state file. A run that dies before the result is recorded
 leaves the entry behind, and later runs do not wake the agent for that
@@ -66,7 +70,7 @@ QUEUE_SETTLE = 30            # seconds an unparsable file is left alone in case 
 CLOCK_SKEW = 300             # an mtime up to this far in the future still counts as just written
 REQUEUE_AFTER = 3600         # deferred files older than this go back into the queue
 MAX_PAGES = 10               # more pages than this is an error, never a silent cut
-DELIVERED_KEEP = 1000        # delivered comment keys remembered per repository
+DELIVERED_KEEP = timedelta(days=7)   # delivered keys are kept this long, far beyond WINDOW
 QUEUE_MARKER = ".github-events-queue"
 REPO_NAME = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 ISSUE_URL_NUMBER = re.compile(r"/issues/(\d+)$")
@@ -166,20 +170,32 @@ def write_json_atomic(path, data, mode=0o600):
 
 
 def move_into(path, dest, data=None):
-    """Move path into dest with os.replace (a symlink moves as a link), adding -1, -2... on a name
-    collision. With data, the moved file is then rewritten as that JSON, atomically, in dest."""
+    """Move path into dest, adding -1, -2... to the name on a collision. Without data this is one
+    os.replace (a symlink moves as a link). With data, that JSON is written atomically under the final
+    name in dest first and the source is removed only afterwards; on any failure the source stays where
+    it was, nothing new is left in dest, and the error propagates."""
     dest.mkdir(parents=True, exist_ok=True)
     stem, suffix = (path.stem, path.suffix) if path.suffix == ".json" else (path.name, "")
     target, i = dest / path.name, 0
     while os.path.lexists(target):
         i += 1
         target = dest / f"{stem}-{i}{suffix}"
-    os.replace(path, target)
-    if data is not None:
+    if data is None:
+        os.replace(path, target)
+        return target
+    if not os.path.lexists(path):
+        raise FileNotFoundError(2, "No such file or directory", str(path))
+    write_json_atomic(target, data)
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    except OSError:
         try:
-            write_json_atomic(target, data)
-        except OSError as e:
-            log(f"queue: moved {path.name} to {dest} but could not update it ({e})")
+            os.unlink(target)
+        except OSError:
+            pass
+        raise
     return target
 
 
@@ -232,14 +248,23 @@ def parse_event(path):
 # ---------------------------------------------------------------- state
 
 def empty_state():
-    return {"repos": {}, "delivered": {}, "pending": {}}
+    return {"delivered": {}, "pending": {}}
 
 
-def load_state(path, dry_run):
-    """The state: "repos" maps a lower-case repository to its highest delivered issue comment id,
-    "delivered" to the "<source>:<id>" keys delivered there (oldest first), and "pending" to the keys
-    whose agent run started but was never recorded as finished, each with its start time and URL.
-    Plain integer ids from the first state format are read as issue comment ids."""
+def iso(t):
+    return t.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def load_state(path, dry_run, now=None):
+    """The state, keyed by lower-case repository: "delivered" maps each "<source>:<id>" key sent to
+    the agent to {"time": the comment's created_at or submitted_at}, and "pending" maps the keys whose
+    agent run started but was never recorded as finished to their start time and URL.
+
+    Delivered keys older than DELIVERED_KEEP are dropped; the WINDOW check already excludes those
+    comments. Older formats are migrated: a "repos" watermark is dropped, and a list of plain integer
+    ids (issue comments) or keys becomes entries with no time and "first_seen" set to now, dropped
+    DELIVERED_KEEP after first_seen."""
+    now = now or datetime.now(timezone.utc)
     try:
         raw = path.read_text()
     except FileNotFoundError:
@@ -247,8 +272,8 @@ def load_state(path, dry_run):
     try:
         data = json.loads(raw)
         if not isinstance(data, dict) or not all(isinstance(data.get(k, {}), dict)
-                                                 for k in ("repos", "delivered", "pending")):
-            raise ValueError("not an object with repos, delivered and pending objects")
+                                                 for k in ("delivered", "pending")):
+            raise ValueError("not an object with delivered and pending objects")
     except ValueError as e:
         stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
         dest = path.with_name(f"{path.name}.corrupt-{stamp}")
@@ -259,18 +284,25 @@ def load_state(path, dry_run):
             log(f"state: {path} is malformed ({e}); moved it to {dest.name} and started empty")
         return empty_state()
     state = empty_state()
-    state["repos"] = {k: v for k, v in data.get("repos", {}).items()
-                      if isinstance(k, str) and isinstance(v, int) and not isinstance(v, bool)}
-    for repo, keys in data.get("delivered", {}).items():
-        if not isinstance(repo, str) or not isinstance(keys, list):
+    for repo, entries in data.get("delivered", {}).items():
+        if not isinstance(repo, str):
             continue
-        out = []
-        for k in keys:
-            if isinstance(k, int) and not isinstance(k, bool):
-                k = f"{ISSUE_COMMENT}:{k}"
-            if isinstance(k, str) and k not in out:
-                out.append(k)
-        state["delivered"][repo] = out
+        if isinstance(entries, list):  # first format: ids or keys, no times
+            entries = {(f"{ISSUE_COMMENT}:{k}" if isinstance(k, int) and not isinstance(k, bool) else k):
+                       {"time": None, "first_seen": iso(now)} for k in entries}
+        if not isinstance(entries, dict):
+            continue
+        kept = {}
+        for key, entry in entries.items():
+            if not isinstance(key, str) or not isinstance(entry, dict):
+                continue
+            seen = parse_time(entry.get("time")) or parse_time(entry.get("first_seen"))
+            if seen is None:  # no usable time at all: start the clock now
+                entry, seen = {"time": None, "first_seen": iso(now)}, now
+            if now - seen <= DELIVERED_KEEP:
+                kept[key] = entry
+        if kept:
+            state["delivered"][repo] = kept
     for repo, entries in data.get("pending", {}).items():
         if isinstance(repo, str) and isinstance(entries, dict):
             state["pending"][repo] = {k: v for k, v in entries.items() if isinstance(k, str) and isinstance(v, dict)}
@@ -278,23 +310,13 @@ def load_state(path, dry_run):
 
 
 def already_handled(state, repo, source, cid):
-    """True when this comment was delivered before. Keys are remembered per repository, so a comment held
-    back by a deferred event is still delivered after a later event moved past it. Issue comment ids older
-    than the oldest one remembered also fall back to the "repos" watermark."""
-    done = state["delivered"].get(repo, [])
-    if f"{source}:{cid}" in done:
-        return True
-    if source != ISSUE_COMMENT:
-        return False
-    last = state["repos"].get(repo, 0)
-    ids = [int(k.split(":", 1)[1]) for k in done
-           if k.startswith(ISSUE_COMMENT + ":") and k.split(":", 1)[1].isdigit()]
-    return cid <= last and (not ids or cid < min(ids))
+    """True when this exact comment was delivered before. Only explicit keys count: a lookup scoped to
+    one issue cannot prove that lower ids elsewhere in the repository were handled."""
+    return f"{source}:{cid}" in state["delivered"].get(repo, {})
 
 
 def mark_pending(state, repo, key, url):
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    state["pending"].setdefault(repo, {})[key] = {"since": stamp, "url": url}
+    state["pending"].setdefault(repo, {})[key] = {"since": iso(datetime.now(timezone.utc)), "url": url}
 
 
 def clear_pending(state, repo, key):
@@ -304,13 +326,10 @@ def clear_pending(state, repo, key):
         state["pending"].pop(repo, None)
 
 
-def mark_delivered(state, repo, source, cid):
+def mark_delivered(state, repo, source, cid, created):
     key = f"{source}:{cid}"
     clear_pending(state, repo, key)
-    done = [k for k in state["delivered"].get(repo, []) if k != key] + [key]
-    state["delivered"][repo] = done[-DELIVERED_KEEP:]
-    if source == ISSUE_COMMENT:
-        state["repos"][repo] = max(state["repos"].get(repo, 0), cid)
+    state["delivered"].setdefault(repo, {})[key] = {"time": iso(created)}
 
 
 # ---------------------------------------------------------------- GitHub
@@ -559,12 +578,16 @@ def drain(qdir, dry_run, gh, run, now):
     failed = False
 
     def act(verb, path, why, fn):
+        nonlocal failed
         log(f"queue: {'would ' + verb if dry_run else verb} {path.name}: {why}")
         if not dry_run:
             try:
                 fn()
             except FileNotFoundError:
                 pass
+            except OSError as e:  # the file stays where it was; the next run tries again
+                failed = True
+                log(f"queue: could not {verb} {path.name} ({e.strerror or e}); it stays where it was")
 
     def defer(path, ev, why):
         nonlocal failed
@@ -623,7 +646,7 @@ def drain(qdir, dry_run, gh, run, now):
             continue
         picked.sort(key=lambda item: item[:3])
         ok, why = True, ""
-        for _, source, cid, repo, number, url, body in picked:
+        for created, source, cid, repo, number, url, body in picked:
             key, rkey = f"{source}:{cid}", repo.lower()
             pending = state["pending"].get(rkey, {}).get(key)
             if pending is not None:
@@ -664,7 +687,7 @@ def drain(qdir, dry_run, gh, run, now):
                 send_alert(url, detail, run)
                 ok, why = False, "ops agent run failed or timed out"
                 break
-            mark_delivered(state, rkey, source, cid)
+            mark_delivered(state, rkey, source, cid, created)
             try:
                 write_json_atomic(state_path, state)
             except OSError as e:
