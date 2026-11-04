@@ -1,18 +1,31 @@
 // OpenClaw plugin entry: github-event-router.
 //
-// Registers one before_dispatch handler. For a post in the GitHub feed
-// channel from a sender listed in botSenderIds it writes a queue file
-// (issues to <queueRoot>/iwb, pull requests to <queueRoot>/prbot) and returns
-// { handled: true } so no model turn runs. A post from any other Slack bot
-// (B id) is claimed but never queued, with a rate-limited "unknown bot
-// sender" log line. A post that contains @openclaw is left to the normal ops
-// agent turn. Messages from people are untouched.
+// Registers one before_dispatch handler for the GitHub feed channel:
+// - An owner's message (channels.slack.allowFrom, or ownerSenderIds) goes to
+//   the normal ops agent turn.
+// - A post from the GitHub app (botSenderIds) is claimed, so no model turn
+//   runs, and becomes queue files: an issue event in <queueRoot>/iwb, a pull
+//   request event in <queueRoot>/prbot, a sweep request in both when no
+//   precise target can be trusted, and a command request in <queueRoot>/ops
+//   when the post mentions @openclaw. The command drain
+//   (bin/openclaw-gh-command-drain) checks the comment's author with the
+//   GitHub API before anything reaches the ops agent.
+// - Every other message in the channel is claimed and dropped, with
+//   rate-limited log lines that help find the GitHub app's sender id.
 //
 // No runtime dependencies and no SDK import: the default export is the plain
 // object definePluginEntry() returns, as in the ecc-orchestrator plugin.
 
-import { buildRecord, buildSweep, recordUnparsed, writeEvent, writeSweep } from "./src/queue.js";
-import { ConfigError, decide, parseConfig } from "./src/router.js";
+import {
+  buildCommand,
+  buildRecord,
+  buildSweep,
+  recordUnparsed,
+  writeCommand,
+  writeEvent,
+  writeSweep,
+} from "./src/queue.js";
+import { ConfigError, decide, isFeedChannel, parseConfig } from "./src/router.js";
 
 export const PLUGIN_ID = "github-event-router";
 
@@ -33,10 +46,21 @@ export function createSenderLog(logger, { intervalMs = SENDER_LOG_INTERVAL_MS, c
   };
 }
 
+function errText(err) {
+  return err?.message ?? String(err);
+}
+
 export function createHandler(
   cfg,
   logger,
-  { write = writeEvent, sweep = writeSweep, unparsed = recordUnparsed, now = () => new Date(), senderLog } = {},
+  {
+    write = writeEvent,
+    sweep = writeSweep,
+    command = writeCommand,
+    unparsed = recordUnparsed,
+    now = () => new Date(),
+    senderLog,
+  } = {},
 ) {
   const logSender = senderLog ?? createSenderLog(logger);
   return async function beforeDispatch(event, ctx) {
@@ -44,8 +68,16 @@ export function createHandler(
     try {
       decision = decide(event, ctx, cfg);
     } catch (err) {
-      logger?.warn?.(`${PLUGIN_ID}: decision failed, leaving message to the agent: ${err?.message ?? err}`);
-      return undefined;
+      // Fail closed in the feed channel: a post we could not judge must not
+      // reach an agent turn.
+      let feed = false;
+      try {
+        feed = isFeedChannel(event, ctx, cfg.channelId);
+      } catch {
+        feed = false;
+      }
+      logger?.warn?.(`${PLUGIN_ID}: decision failed${feed ? ", message dropped" : ""}: ${errText(err)}`);
+      return feed ? { handled: true } : undefined;
     }
     if (decision.unknownBot) {
       logSender(decision.unknownBot, `${PLUGIN_ID}: unknown bot sender ${decision.unknownBot}`);
@@ -57,35 +89,43 @@ export function createHandler(
       );
     }
     if (decision.action !== "claim") return undefined;
-    if (decision.unknownBot) return { handled: true };
 
     const messageId = event?.messageId ?? ctx?.messageId;
+    const stamp = now();
     if (decision.parsed) {
-      const record = buildRecord(decision.parsed, { messageId, channelId: cfg.channelId, now: now() });
+      const record = buildRecord(decision.parsed, { messageId, channelId: cfg.channelId, now: stamp });
       try {
         const file = await write(cfg.queueRoot, record);
         logger?.info?.(`${PLUGIN_ID}: queued ${record.repo} ${record.kind} #${record.number} ${record.event} -> ${file}`);
       } catch (err) {
-        // Still claim: the hourly backstop scan picks the item up, and an
-        // unclaimed post would only wake the agent for nothing.
-        logger?.warn?.(`${PLUGIN_ID}: could not write queue file for ${record.repo}#${record.number}: ${err?.message ?? err}`);
+        // Still claim: the hourly backstop scan picks the item up.
+        logger?.warn?.(`${PLUGIN_ID}: could not write queue file for ${record.repo}#${record.number}: ${errText(err)}`);
       }
-    } else {
+    } else if (decision.sweep) {
       try {
-        await unparsed(cfg.queueRoot, { messageId, content: event?.content, body: event?.body, now: now() });
+        await unparsed(cfg.queueRoot, { messageId, content: event?.content, body: event?.body, now: stamp });
       } catch {
         // best effort only
       }
     }
     if (decision.sweep) {
-      // The post did not name a target we can trust, so ask both consumers
-      // for a full pass instead of depending on the parser.
-      const record = buildSweep({ repo: decision.sweepRepo, messageId, channelId: cfg.channelId, now: now() });
+      // No target we can trust: ask both consumers for a full pass.
+      const record = buildSweep({ repo: decision.sweepRepo, messageId, channelId: cfg.channelId, now: stamp });
       try {
-        await sweep(cfg.queueRoot, record);
-        logger?.info?.(`${PLUGIN_ID}: queued sweep for ${record.repo ?? "all repos"} (post ${messageId ?? "(no id)"})`);
+        const { written, failed } = await sweep(cfg.queueRoot, record);
+        for (const f of failed) logger?.warn?.(`${PLUGIN_ID}: could not write sweep to ${f.queue}: ${errText(f.error)}`);
+        if (written.length) logger?.info?.(`${PLUGIN_ID}: queued sweep for ${record.repo ?? "all repos"} (post ${messageId ?? "(no id)"})`);
       } catch (err) {
-        logger?.warn?.(`${PLUGIN_ID}: could not write sweep: ${err?.message ?? err}`);
+        logger?.warn?.(`${PLUGIN_ID}: could not write sweep: ${errText(err)}`);
+      }
+    }
+    if (decision.command) {
+      const record = buildCommand(decision.command, { messageId, channelId: cfg.channelId, now: stamp });
+      try {
+        const file = await command(cfg.queueRoot, record);
+        logger?.info?.(`${PLUGIN_ID}: queued @openclaw command check for ${record.repo ?? "all repos"}${record.number ? `#${record.number}` : ""} -> ${file}`);
+      } catch (err) {
+        logger?.warn?.(`${PLUGIN_ID}: could not write command request: ${errText(err)}`);
       }
     }
     return { handled: true };
@@ -96,19 +136,22 @@ export function register(api) {
   const logger = api.logger;
   let cfg;
   try {
-    cfg = parseConfig(api.pluginConfig ?? {});
+    cfg = parseConfig(api.pluginConfig ?? {}, { openclawConfig: api.config });
   } catch (err) {
     const message = err instanceof ConfigError ? err.message : "invalid configuration";
     logger?.warn?.(`${PLUGIN_ID}: ${message}; the router is not active`);
     return;
   }
+  if (cfg.ownerSenderIds.length === 0) {
+    logger?.warn?.(`${PLUGIN_ID}: no owner ids (channels.slack.allowFrom or ownerSenderIds); every message in ${cfg.channelId} will be dropped`);
+  }
   api.on("before_dispatch", createHandler(cfg, logger));
-  logger?.info?.(`${PLUGIN_ID}: watching Slack channel ${cfg.channelId}, queue root ${cfg.queueRoot}`);
+  logger?.info?.(`${PLUGIN_ID}: watching Slack channel ${cfg.channelId}, queue root ${cfg.queueRoot}, ${cfg.ownerSenderIds.length} owner id(s)`);
 }
 
 export default {
   id: PLUGIN_ID,
   name: "GitHub Event Router",
-  description: "Queues GitHub Slack app posts for issue-worker-bots and pr-review-bots without a model turn.",
+  description: "Queues GitHub Slack app posts for issue-worker-bots, pr-review-bots and the verified-command drain without a model turn.",
   register,
 };

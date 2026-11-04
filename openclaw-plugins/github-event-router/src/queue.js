@@ -92,11 +92,39 @@ export function buildSweep({ repo, messageId, channelId, now = new Date() }) {
  * pending sweep they claim into one pass.
  */
 export async function writeSweep(root, sweep, { fsImpl = fs } = {}) {
+  // Each queue independently: a failure for one consumer must not stop the
+  // request reaching the other. The caller logs each failure.
+  const results = await Promise.allSettled(SWEEP_QUEUES.map((queue) => publish(root, queue, sweepFileName(sweep), sweep, fsImpl)));
   const written = [];
-  for (const queue of SWEEP_QUEUES) {
-    written.push(await publish(root, queue, sweepFileName(sweep), sweep, fsImpl));
-  }
-  return written;
+  const failed = [];
+  results.forEach((r, i) => {
+    if (r.status === "fulfilled") written.push(r.value);
+    else failed.push({ queue: SWEEP_QUEUES[i], error: r.reason });
+  });
+  return { written, failed };
+}
+
+export const COMMAND_QUEUE = "ops";
+
+export function buildCommand(target, { messageId, channelId, now = new Date() }) {
+  return {
+    kind: "command",
+    repo: target.repo ?? null,
+    number: target.number ?? null,
+    target_kind: target.target_kind ?? null,
+    received_at: now.toISOString(),
+    slack_message_id: messageId ?? null,
+    slack_channel: channelId,
+    source: "github-event-router",
+    version: 1,
+  };
+}
+
+/** A request for the verified-command drain (bin/openclaw-gh-command-drain). */
+export async function writeCommand(root, command, { fsImpl = fs } = {}) {
+  const rand = crypto.randomBytes(3).toString("hex");
+  const name = `${compactTimestamp(command.received_at)}-${safePart(command.slack_message_id ?? "nots")}-command-${rand}.json`;
+  return publish(root, COMMAND_QUEUE, name, command, fsImpl);
 }
 
 async function publish(root, queue, name, record, fsImpl) {

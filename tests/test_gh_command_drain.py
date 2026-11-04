@@ -1,0 +1,472 @@
+"""lib/gh_command_drain.py with a fake GitHub API, a fake token command and a
+fake `openclaw` command: no network, no real credentials, temporary folders.
+
+Run from the repository root: python3 -m unittest discover -s tests
+"""
+import contextlib
+import importlib.util
+import io
+import json
+import os
+import subprocess
+import tempfile
+import time
+import unittest
+import urllib.parse
+from unittest import mock
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+WRAPPER = os.path.join(ROOT, "bin", "openclaw-gh-command-drain")
+spec = importlib.util.spec_from_file_location("gh_command_drain", os.path.join(ROOT, "lib", "gh_command_drain.py"))
+drain = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(drain)
+
+TOKEN = "fake-installation-token-for-tests"
+API = "https://api.example.test"
+RECEIVED = "2026-11-04T01:02:03.123Z"
+IN_WINDOW = "2026-11-04T01:01:00Z"
+BEFORE_WINDOW = "2026-11-04T00:40:00Z"
+
+FAKE_TOKEN = """#!/bin/sh
+[ "${FAKE_TOKEN_EXIT:-0}" = 0 ] || exit "$FAKE_TOKEN_EXIT"
+printf '%s\\n' "$FAKE_TOKEN"
+"""
+FAKE_OPENCLAW = """#!/bin/sh
+printf '%s\\n' "$@" > "$AGENT_LOG.argv.$$"
+file=""
+prev=""
+for a in "$@"; do [ "$prev" = --message-file ] && file=$a; prev=$a; done
+cat "$file" > "$AGENT_LOG.msg.$$"
+ls -l "$file" | cut -c1-10 > "$AGENT_LOG.mode.$$"
+echo "$$" >> "$AGENT_LOG"
+exit "${FAKE_AGENT_EXIT:-0}"
+"""
+
+
+def comment(cid, body="@openclaw please fix", login="kennylhilljr", type_="User", created=IN_WINDOW,
+            repo="octo/app", number=7):
+    return {"id": cid, "body": body, "user": {"login": login, "type": type_}, "created_at": created,
+            "html_url": f"https://github.com/{repo}/issues/{number}#issuecomment-{cid}",
+            "issue_url": f"{API}/repos/{repo}/issues/{number}"}
+
+
+class FakeGitHub:
+    """Answers by request path. routes maps a path to a JSON value or an int HTTP status."""
+
+    def __init__(self, routes):
+        self.routes = routes
+        self.calls = []
+
+    def __call__(self, url, headers):
+        parts = urllib.parse.urlsplit(url)
+        self.calls.append((parts.path, dict(urllib.parse.parse_qsl(parts.query)), headers))
+        reply = self.routes.get(parts.path, 404)
+        if isinstance(reply, int):
+            return reply, {}, json.dumps({"message": "Not Found"}).encode()
+        return 200, {}, json.dumps(reply).encode()
+
+
+class DrainTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        t = self.tmp.name
+        self.home = os.path.join(t, "home")
+        self.root = os.path.join(self.home, ".local/state/github-events")
+        self.queue = os.path.join(self.root, "ops")
+        self.deferred = os.path.join(self.root, "ops-deferred")
+        self.rejected = os.path.join(self.root, "ops-rejected")
+        self.state_dir = os.path.join(t, "state")
+        self.state = os.path.join(self.state_dir, "state.json")
+        os.makedirs(self.queue)
+        with open(os.path.join(self.root, ".github-events-queue"), "w"):
+            pass
+        fake = os.path.join(t, "fakebin")
+        os.makedirs(fake)
+        self.token_cmd = os.path.join(fake, "openclaw-gh-app-token")
+        self.openclaw = os.path.join(fake, "openclaw")
+        for path, body in ((self.token_cmd, FAKE_TOKEN), (self.openclaw, FAKE_OPENCLAW)):
+            with open(path, "w") as fh:
+                fh.write(body)
+            os.chmod(path, 0o755)
+        self.agent_log = os.path.join(t, "agent")
+        self.env = {
+            "HOME": self.home, "OPENCLAW_GH_COMMAND_STATE_DIR": self.state_dir,
+            "OPENCLAW_GH_APP_TOKEN_CMD": self.token_cmd, "OPENCLAW_BIN": self.openclaw,
+            "GITHUB_API_URL": API, "FAKE_TOKEN": TOKEN, "AGENT_LOG": self.agent_log,
+            "FAKE_AGENT_EXIT": "0", "FAKE_TOKEN_EXIT": "0",
+        }
+        self.n = 0
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def event(self, repo="octo/app", number=7, name=None, **extra):
+        self.n += 1
+        ev = {"kind": "command", "repo": repo, "number": number,
+              "target_kind": "issue" if number else None, "received_at": RECEIVED,
+              "slack_message_id": "1730643302.123456", "slack_channel": "C0CEMPH1L0N",
+              "source": "github-event-router", "version": 1}
+        ev.update(extra)
+        path = os.path.join(self.queue, name or f"20261104T010203123Z-{self.n}-command-abc.json")
+        with open(path, "w") as fh:
+            json.dump(ev, fh)
+        return path
+
+    def run_drain(self, *args, routes=None, env=None):
+        gh = FakeGitHub(routes or {})
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.dict(os.environ, dict(self.env, **(env or {}))):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = drain.main(list(args), http_get=gh)
+        self.output = out.getvalue() + err.getvalue()
+        self.assertNotIn(TOKEN, self.output)
+        return code, gh
+
+    def agent_runs(self):
+        """[(argv, message, mode)] for each fake openclaw run, in order."""
+        if not os.path.exists(self.agent_log):
+            return []
+        def read(path):
+            with open(path) as fh:
+                return fh.read()
+        runs = []
+        for pid in read(self.agent_log).split():
+            base = f"{self.agent_log}.%s.{pid}"
+            runs.append((read(base % "argv").splitlines(), read(base % "msg"), read(base % "mode").strip()))
+        return runs
+
+    def listing(self, d):
+        return sorted(os.listdir(d)) if os.path.isdir(d) else []
+
+    def load_state(self):
+        with open(self.state) as fh:
+            return json.load(fh)
+
+    # ---- queue safety
+    def assert_refused(self, *args):
+        before = {d: self.listing(d) for d in (self.queue, self.deferred, self.rejected)}
+        code, gh = self.run_drain(*args)
+        self.assertEqual(code, 2, self.output)
+        self.assertIn("refusing", self.output)
+        self.assertEqual(gh.calls, [])
+        self.assertEqual(before, {d: self.listing(d) for d in (self.queue, self.deferred, self.rejected)})
+        self.assertEqual(self.agent_runs(), [])
+
+    def test_refuses_unmarked_directory(self):
+        other = os.path.join(self.tmp.name, "elsewhere", "ops")
+        os.makedirs(other)
+        with open(os.path.join(other, "x.json"), "w") as fh:
+            fh.write("{}")
+        self.assert_refused("--queue", other)
+        self.assertEqual(os.listdir(other), ["x.json"])
+
+    def test_refuses_symlinked_queue(self):
+        link = os.path.join(self.root, "ops-link")
+        os.symlink(self.queue, link)
+        self.assert_refused("--queue", link)
+
+    def test_refuses_queue_that_is_a_file(self):
+        f = os.path.join(self.root, "notdir")
+        open(f, "w").close()
+        self.assert_refused("--queue", f)
+
+    def test_refuses_marker_that_is_a_symlink(self):
+        other = os.path.join(self.tmp.name, "other")
+        os.makedirs(os.path.join(other, "ops"))
+        os.symlink(os.path.join(self.root, ".github-events-queue"), os.path.join(other, ".github-events-queue"))
+        self.assert_refused("--queue", os.path.join(other, "ops"))
+
+    def test_refuses_symlinked_side_directories(self):
+        elsewhere = os.path.join(self.tmp.name, "elsewhere")
+        os.makedirs(elsewhere)
+        for kind in ("deferred", "rejected"):
+            with self.subTest(kind=kind):
+                side = os.path.join(self.root, f"ops-{kind}")
+                os.symlink(elsewhere, side)
+                self.event()
+                self.assert_refused()
+                os.unlink(side)
+
+    def test_missing_default_queue_is_quiet(self):
+        os.rmdir(self.queue)
+        code, gh = self.run_drain()
+        self.assertEqual(code, 0)
+        self.assertEqual(self.output, "")
+        self.assertFalse(os.path.exists(self.queue))
+
+    def test_lock_held_exits_zero(self):
+        self.event()
+        os.makedirs(self.state_dir)
+        import fcntl
+        with open(os.path.join(self.state_dir, "drain.lock"), "w") as f:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            code, gh = self.run_drain()
+        self.assertEqual(code, 0)
+        self.assertEqual(gh.calls, [])
+        self.assertEqual(len(self.listing(self.queue)), 1)
+
+    # ---- entries
+    def test_stray_entries_rejected(self):
+        os.makedirs(os.path.join(self.queue, "subdir"))
+        open(os.path.join(self.queue, ".hidden.json"), "w").close()
+        open(os.path.join(self.queue, "notes.txt"), "w").close()
+        target = os.path.join(self.tmp.name, "target.json")
+        with open(target, "w") as fh:
+            fh.write("{}")
+        os.symlink(target, os.path.join(self.queue, "link.json"))
+        with open(os.path.join(self.queue, "other.json"), "w") as fh:
+            json.dump({"kind": "pull_request", "repo": "octo/app", "number": 1}, fh)
+        with open(os.path.join(self.queue, "badrepo.json"), "w") as fh:
+            json.dump({"kind": "command", "repo": "nope", "number": None, "received_at": RECEIVED}, fh)
+        with open(os.path.join(self.queue, "badnum.json"), "w") as fh:
+            json.dump({"kind": "command", "repo": "octo/app", "number": 0, "received_at": RECEIVED}, fh)
+        code, gh = self.run_drain()
+        self.assertEqual(code, 0, self.output)
+        self.assertEqual(self.listing(self.queue), [])
+        self.assertEqual(self.listing(self.rejected),
+                         [".hidden.json", "badnum.json", "badrepo.json", "link.json", "notes.txt",
+                          "other.json", "subdir"])
+        self.assertTrue(os.path.islink(os.path.join(self.rejected, "link.json")))
+        self.assertTrue(os.path.exists(target))
+        self.assertEqual(gh.calls, [])
+
+    def test_young_partial_file_kept_old_one_rejected(self):
+        young = os.path.join(self.queue, "young.json")
+        old = os.path.join(self.queue, "old.json")
+        for p in (young, old):
+            with open(p, "w") as fh:
+                fh.write('{"kind": "comm')
+        os.utime(old, (time.time() - 60, time.time() - 60))
+        code, _ = self.run_drain()
+        self.assertEqual(code, 0, self.output)
+        self.assertEqual(self.listing(self.queue), ["young.json"])
+        self.assertEqual(self.listing(self.rejected), ["old.json"])
+
+    # ---- verification and delivery
+    def test_trusted_comment_wakes_agent(self):
+        path = self.event()
+        routes = {"/repos/octo/app/issues/7/comments": [comment(105, "Hey @OpenClaw rebase this\nplease")]}
+        code, gh = self.run_drain(routes=routes)
+        self.assertEqual(code, 0, self.output)
+        self.assertFalse(os.path.exists(path))
+        self.assertEqual(self.listing(self.deferred), [])
+        (argv, msg, mode), = self.agent_runs()
+        self.assertEqual(msg, "Verified GitHub command from kennylhilljr (the drain checked the author with the "
+                              "GitHub API).\nComment: https://github.com/octo/app/issues/7#issuecomment-105\n"
+                              "On: octo/app#7\n\nHey @OpenClaw rebase this\nplease")
+        self.assertEqual(mode, "-rw-------")
+        self.assertEqual(argv[:4], ["agent", "--agent", "ops", "--message-file"])
+        self.assertEqual(argv[5:], ["--deliver", "--reply-channel", "slack", "--reply-to",
+                                    "channel:C0CEMPH1L0N", "--timeout", "600"])
+        self.assertFalse(os.path.exists(argv[4]))
+        self.assertFalse(os.path.exists(os.path.dirname(argv[4])))
+        self.assertEqual(self.load_state()["repos"], {"octo/app": 105})
+        self.assertEqual(os.stat(self.state).st_mode & 0o777, 0o600)
+        (p, q, headers), = gh.calls
+        self.assertEqual(q, {"per_page": "100", "since": "2026-11-04T00:47:03Z"})
+        self.assertEqual(headers["Authorization"], f"Bearer {TOKEN}")
+        self.assertEqual(headers["Accept"], "application/vnd.github+json")
+        self.assertEqual(headers["X-GitHub-Api-Version"], "2022-11-28")
+        # a second command for the same issue does not repeat the delivered comment
+        self.event()
+        code, _ = self.run_drain(routes=routes)
+        self.assertEqual(code, 0, self.output)
+        self.assertEqual(len(self.agent_runs()), 1)
+
+    def test_untrusted_comments_ignored(self):
+        path = self.event()
+        os.makedirs(self.state_dir)
+        with open(self.state, "w") as fh:
+            json.dump({"repos": {"octo/app": 50}}, fh)
+        routes = {"/repos/octo/app/issues/7/comments": [
+            comment(101, login="kennylhilljr-evil"),
+            comment(102, login="KennyLHillJr"),
+            comment(103, type_="Bot"),
+            comment(104, body="please fix this"),
+            comment(40),
+            comment(106, created=BEFORE_WINDOW),
+            {"id": 107, "body": "@openclaw", "user": "kennylhilljr"},
+        ]}
+        code, _ = self.run_drain(routes=routes)
+        self.assertEqual(code, 0, self.output)
+        self.assertFalse(os.path.exists(path))
+        self.assertEqual(self.agent_runs(), [])
+        self.assertEqual(self.load_state()["repos"], {"octo/app": 50})
+
+    def test_comments_delivered_oldest_first(self):
+        self.event()
+        routes = {"/repos/octo/app/issues/7/comments": [comment(120, "@openclaw second"),
+                                                         comment(110, "@openclaw first")]}
+        code, _ = self.run_drain(routes=routes)
+        self.assertEqual(code, 0, self.output)
+        self.assertEqual([m.rsplit("\n", 1)[1] for _, m, _ in self.agent_runs()],
+                         ["@openclaw first", "@openclaw second"])
+        self.assertEqual(self.load_state()["repos"], {"octo/app": 120})
+
+    def test_number_null_uses_repo_wide_endpoint(self):
+        self.event(number=None)
+        routes = {"/repos/octo/app/issues/comments": [comment(130, number=9)]}
+        code, gh = self.run_drain(routes=routes)
+        self.assertEqual(code, 0, self.output)
+        (p, q, _), = gh.calls
+        self.assertEqual(p, "/repos/octo/app/issues/comments")
+        self.assertEqual(q, {"sort": "created", "direction": "desc", "per_page": "100",
+                             "since": "2026-11-04T00:47:03Z"})
+        (_, msg, _), = self.agent_runs()
+        self.assertIn("\nOn: octo/app#9\n", msg)
+
+    def test_repo_null_lists_installation_repos(self):
+        self.event(repo=None, number=None)
+        routes = {
+            "/installation/repositories": {"total_count": 2, "repositories": [
+                {"full_name": "octo/app"}, {"full_name": "octo/lib"}]},
+            "/repos/octo/app/issues/comments": [comment(150, repo="octo/app", number=1)],
+            "/repos/octo/lib/issues/comments": [comment(140, repo="octo/lib", number=2)],
+        }
+        code, gh = self.run_drain(routes=routes)
+        self.assertEqual(code, 0, self.output)
+        self.assertEqual([c[0] for c in gh.calls], ["/installation/repositories",
+                                                    "/repos/octo/app/issues/comments",
+                                                    "/repos/octo/lib/issues/comments"])
+        self.assertEqual(gh.calls[0][1], {"per_page": "100"})
+        msgs = [m for _, m, _ in self.agent_runs()]
+        self.assertIn("On: octo/lib#2", msgs[0])
+        self.assertIn("On: octo/app#1", msgs[1])
+        self.assertEqual(self.load_state()["repos"], {"octo/app": 150, "octo/lib": 140})
+
+    # ---- failures
+    def test_agent_failure_defers_without_advancing(self):
+        path = self.event()
+        routes = {"/repos/octo/app/issues/7/comments": [comment(160), comment(161)]}
+        code, _ = self.run_drain(routes=routes, env={"FAKE_AGENT_EXIT": "3"})
+        self.assertEqual(code, 1)
+        self.assertEqual(len(self.agent_runs()), 1)
+        self.assertFalse(os.path.exists(path))
+        name = os.path.basename(path)
+        self.assertEqual(self.listing(self.deferred), [name])
+        with open(os.path.join(self.deferred, name)) as fh:
+            self.assertEqual(json.load(fh)["attempts"], 1)
+        self.assertFalse(os.path.exists(self.state))
+        # a later command for the same repository goes first; the deferred one still gets its comment
+        self.event()
+        routes2 = {"/repos/octo/app/issues/7/comments": [comment(160), comment(161), comment(170)]}
+        code, _ = self.run_drain(routes=routes2)
+        self.assertEqual(code, 0, self.output)
+        self.assertEqual(self.load_state()["repos"], {"octo/app": 170})
+        self.assertEqual(len(self.agent_runs()), 4)
+
+    def test_partial_delivery_advances_only_delivered(self):
+        self.event()
+        routes = {"/repos/octo/app/issues/7/comments": [comment(160), comment(161)]}
+        # the first run succeeds, every later one fails
+        script = FAKE_OPENCLAW.replace('exit "${FAKE_AGENT_EXIT:-0}"',
+                                       '[ -e "$AGENT_LOG.fail" ] && exit 1; touch "$AGENT_LOG.fail"; exit 0')
+        with open(self.openclaw, "w") as fh:
+            fh.write(script)
+        code, _ = self.run_drain(routes=routes)
+        self.assertEqual(code, 1)
+        self.assertEqual(self.load_state()["repos"], {"octo/app": 160})
+        self.assertEqual(len(self.listing(self.deferred)), 1)
+
+    def test_token_failure_defers(self):
+        path = self.event()
+        code, gh = self.run_drain(env={"FAKE_TOKEN_EXIT": "1"})
+        self.assertEqual(code, 1)
+        self.assertEqual(gh.calls, [])
+        self.assertEqual(self.listing(self.deferred), [os.path.basename(path)])
+        self.assertEqual(self.agent_runs(), [])
+
+    def test_http_error_defers(self):
+        path = self.event()
+        code, _ = self.run_drain(routes={"/repos/octo/app/issues/7/comments": 502})
+        self.assertEqual(code, 1)
+        self.assertIn("HTTP 502", self.output)
+        self.assertEqual(self.listing(self.deferred), [os.path.basename(path)])
+
+    def test_twenty_fourth_attempt_is_rejected(self):
+        path = self.event(attempts=23)
+        bad = self.event(attempts=-5)
+        code, _ = self.run_drain(env={"FAKE_TOKEN_EXIT": "1"})
+        self.assertEqual(code, 1)
+        self.assertEqual(self.listing(self.rejected), [os.path.basename(path)])
+        with open(os.path.join(self.rejected, os.path.basename(path))) as fh:
+            self.assertEqual(json.load(fh)["attempts"], 24)
+        with open(os.path.join(self.deferred, os.path.basename(bad))) as fh:
+            self.assertEqual(json.load(fh)["attempts"], 1)
+
+    def test_old_deferred_requeued(self):
+        os.makedirs(self.deferred)
+        old = self.event(name="old-command.json")
+        new = self.event(name="new-command.json")
+        for p in (old, new):
+            os.replace(p, os.path.join(self.deferred, os.path.basename(p)))
+        t = time.time() - 3700
+        os.utime(os.path.join(self.deferred, "old-command.json"), (t, t))
+        code, _ = self.run_drain(routes={"/repos/octo/app/issues/7/comments": []})
+        self.assertEqual(code, 0, self.output)
+        self.assertEqual(self.listing(self.deferred), ["new-command.json"])
+        self.assertEqual(self.listing(self.queue), [])  # requeued, then handled in the same run
+
+    def test_dry_run_changes_nothing(self):
+        os.makedirs(self.deferred)
+        self.event()
+        old = os.path.join(self.deferred, "old.json")
+        with open(old, "w") as fh:
+            fh.write("{}")
+        os.utime(old, (time.time() - 7200, time.time() - 7200))
+        open(os.path.join(self.queue, "notes.txt"), "w").close()
+        os.makedirs(self.state_dir)
+        with open(self.state, "w") as fh:
+            fh.write("not json")
+        before = {d: self.listing(d) for d in (self.queue, self.deferred, self.state_dir)}
+        routes = {"/repos/octo/app/issues/7/comments": [comment(180)]}
+        code, _ = self.run_drain("--dry-run", routes=routes)
+        self.assertEqual(code, 0, self.output)
+        self.assertIn("would wake the ops agent", self.output)
+        self.assertEqual(self.agent_runs(), [])
+        after = {d: self.listing(d) for d in (self.queue, self.deferred, self.state_dir)}
+        after[self.state_dir].remove("drain.lock")
+        self.assertEqual(before, after)
+        self.assertFalse(os.path.exists(self.rejected))
+        with open(self.state) as fh:
+            self.assertEqual(fh.read(), "not json")
+
+    def test_corrupt_state_quarantined(self):
+        self.event()
+        os.makedirs(self.state_dir)
+        with open(self.state, "w") as fh:
+            fh.write("[1, 2]")
+        code, _ = self.run_drain(routes={"/repos/octo/app/issues/7/comments": [comment(190)]})
+        self.assertEqual(code, 0, self.output)
+        self.assertIn("malformed", self.output)
+        corrupt = [n for n in os.listdir(self.state_dir) if n.startswith("state.json.corrupt-")]
+        self.assertEqual(len(corrupt), 1)
+        self.assertEqual(self.load_state()["repos"], {"octo/app": 190})
+
+    def test_token_never_written(self):
+        self.event()
+        self.event(number=None, name="zz-command.json")
+        routes = {"/repos/octo/app/issues/7/comments": [comment(200)], "/repos/octo/app/issues/comments": 500}
+        self.run_drain(routes=routes, env={"FAKE_AGENT_EXIT": "1"})
+        for d in (self.state_dir, self.deferred, self.rejected, self.queue):
+            for n in self.listing(d):
+                p = os.path.join(d, n)
+                if os.path.isfile(p):
+                    with open(p, errors="replace") as fh:
+                        self.assertNotIn(TOKEN, fh.read(), p)
+        for _, msg, _ in self.agent_runs():
+            self.assertNotIn(TOKEN, msg)
+
+    # ---- the wrapper
+    def test_wrapper_refuses_and_exits_two(self):
+        self.assertEqual(subprocess.run(["sh", "-n", WRAPPER]).returncode, 0)
+        other = os.path.join(self.tmp.name, "plain")
+        os.makedirs(other)
+        env = dict(os.environ, **self.env)
+        r = subprocess.run(["/bin/sh", WRAPPER, "--queue", other], capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("refusing", r.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()

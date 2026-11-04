@@ -13,7 +13,25 @@ const OPENCLAW_MENTION = /@openclaw(?![A-Za-z0-9_])/i;
 
 export class ConfigError extends Error {}
 
-export function parseConfig(raw = {}, { home = os.homedir() } = {}) {
+// Slack allowFrom entries may be plain ids or prefixed ("slack:U…", "user:U…").
+// A wildcard grants nobody owner status here.
+export function ownerIdsFrom(list) {
+  if (!Array.isArray(list)) return [];
+  const ids = [];
+  for (const entry of list) {
+    if (typeof entry !== "string") continue;
+    const id = entry.trim().replace(/^(?:slack:)?(?:user:)?/i, "");
+    if (/^[UW][A-Z0-9]{6,}$/.test(id) && !ids.includes(id)) ids.push(id);
+  }
+  return ids;
+}
+
+/**
+ * @param raw plugins.entries.github-event-router.config
+ * @param openclawConfig the full OpenClaw config (api.config); owners come
+ *   from channels.slack.allowFrom unless the plugin config sets ownerSenderIds.
+ */
+export function parseConfig(raw = {}, { home = os.homedir(), openclawConfig } = {}) {
   const cfg = raw && typeof raw === "object" ? raw : {};
   const channelId = cfg.channelId ?? DEFAULT_CHANNEL_ID;
   if (typeof channelId !== "string" || !/^[CG][A-Z0-9]{6,}$/.test(channelId)) {
@@ -27,7 +45,11 @@ export function parseConfig(raw = {}, { home = os.homedir() } = {}) {
   if (!Array.isArray(botSenderIds) || botSenderIds.some((id) => typeof id !== "string" || !/^[BUW][A-Z0-9]{6,}$/.test(id))) {
     throw new ConfigError("botSenderIds must be a list of Slack ids");
   }
-  return { channelId, queueRoot: path.normalize(queueRoot), botSenderIds: [...botSenderIds] };
+  if (cfg.ownerSenderIds !== undefined && (!Array.isArray(cfg.ownerSenderIds) || ownerIdsFrom(cfg.ownerSenderIds).length !== cfg.ownerSenderIds.length)) {
+    throw new ConfigError("ownerSenderIds must be a list of Slack user ids");
+  }
+  const ownerSenderIds = ownerIdsFrom(cfg.ownerSenderIds ?? openclawConfig?.channels?.slack?.allowFrom);
+  return { channelId, queueRoot: path.normalize(queueRoot), botSenderIds: [...botSenderIds], ownerSenderIds };
 }
 
 function escapeRe(s) {
@@ -102,10 +124,16 @@ function trimmed(s) {
  *
  * @returns {{parsed: object | null, sweep: boolean, sweepRepo: string | null}}
  */
+export function contentIsTrusted(event) {
+  const content = trimmed(event?.content);
+  const body = trimmed(event?.body);
+  return Boolean(content && body && content !== body);
+}
+
 export function analyzePost(event) {
   const content = trimmed(event?.content);
   const body = trimmed(event?.body);
-  if (content && body && content !== body) {
+  if (contentIsTrusted(event)) {
     const parsed = parseGithubPost(content);
     return { parsed, sweep: !parsed, sweepRepo: parsed ? null : extractRepo(content) };
   }
@@ -113,37 +141,53 @@ export function analyzePost(event) {
 }
 
 /**
- * @returns {{action: "ignore", hintSender?: string} |
- *   {action: "pass", reason: string, unknownBot?: string} |
- *   {action: "claim", parsed: object | null, sweep: boolean, sweepRepo: string | null, unknownBot?: string}}
- *   ignore: not ours, return undefined. hintSender is set when a sender that
- *     is neither listed nor a B id posted something GitHub-shaped (a
- *     github.com/owner/repo link or an "[owner/repo]" line), parsed or not,
- *     so the operator can tell whether it is the app.
- *   pass: let the normal agent turn run (the post contains @openclaw).
- *   claim: return { handled: true }. Queue parsed when it is not null, and a
- *     sweep (full pass) when sweep is true.
- *     unknownBot is set for a B sender that is not in botSenderIds: claimed
- *     so it cannot start a paid agent turn, but never queued.
+ * Where a verified-command request should look. Only a target read from
+ * trusted text is used; otherwise the drain scans every installed repo.
+ */
+function commandTarget(event, analysis) {
+  if (!contentIsTrusted(event)) return { repo: null, number: null, target_kind: null };
+  if (analysis.parsed) {
+    return { repo: analysis.parsed.repo, number: analysis.parsed.number, target_kind: analysis.parsed.kind };
+  }
+  return { repo: analysis.sweepRepo, number: null, target_kind: null };
+}
+
+const NO_WORK = { parsed: null, sweep: false, sweepRepo: null, command: null };
+
+/**
+ * Nothing in a GitHub post ever reaches an agent turn directly: comment
+ * bodies are written by whoever can comment on GitHub. Only owners
+ * (channels.slack.allowFrom, or ownerSenderIds) get a normal turn.
+ *
+ * @returns {{action: "ignore"} |
+ *   {action: "claim", parsed, sweep, sweepRepo, command, unknownBot?, hintSender?}}
+ *   ignore: an owner's message; return undefined so the ops turn runs.
+ *   claim: return { handled: true }. Queue parsed when not null, a sweep when
+ *     sweep is true, and a command request (for the verified-command drain)
+ *     when command is not null.
+ *     unknownBot: a B sender not in botSenderIds; nothing is queued.
+ *     hintSender: any other non-owner whose post is GitHub-shaped (a
+ *     github.com/owner/repo link or an "[owner/repo]" line), so the operator
+ *     can tell whether it is the app. Nothing is queued.
  */
 export function decide(event, ctx, cfg) {
   if (!isFeedChannel(event, ctx, cfg.channelId)) return { action: "ignore" };
   const sender = senderOf(event, ctx);
+  if (sender && (cfg.ownerSenderIds ?? []).includes(sender)) return { action: "ignore" };
   const text = messageText(event);
   if (isGithubSender(event, ctx, cfg.botSenderIds)) {
-    if (mentionsOpenclaw(text)) return { action: "pass", reason: "mention" };
-    return { action: "claim", ...analyzePost(event) };
+    const analysis = analyzePost(event);
+    const command = mentionsOpenclaw(text) ? commandTarget(event, analysis) : null;
+    return { action: "claim", ...analysis, command };
   }
-  if (isSlackBotId(sender)) {
-    if (mentionsOpenclaw(text)) return { action: "pass", reason: "mention", unknownBot: sender };
-    return { action: "claim", parsed: null, sweep: false, sweepRepo: null, unknownBot: sender };
-  }
-  // Possibly a person (Kenny), or an app whose posts carry a U or W id. The
-  // before_dispatch event in 2026.9.6 carries no bot_id, subtype or app id
-  // (PluginHookBeforeDispatchEvent/Context in openclaw's d.ts, filled in
-  // dist/dispatch-from-config-*.mjs), so the text is the only clue.
-  if (sender && isGithubShaped(text)) return { action: "ignore", hintSender: sender };
-  return { action: "ignore" };
+  if (isSlackBotId(sender)) return { action: "claim", ...NO_WORK, unknownBot: sender };
+  // Someone else: a person who is not an owner, or an app whose posts carry
+  // a U or W id. The before_dispatch event in 2026.9.6 carries no bot_id,
+  // subtype or app id (PluginHookBeforeDispatchEvent/Context in openclaw's
+  // d.ts, filled in dist/dispatch-from-config-*.mjs), so the text is the only
+  // clue for the hint.
+  if (sender && isGithubShaped(text)) return { action: "claim", ...NO_WORK, hintSender: sender };
+  return { action: "claim", ...NO_WORK };
 }
 
 const GITHUB_SHAPED_RE = /https?:\/\/(?:www\.)?github\.com\/[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}|^[*_\s]*\[[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}\]/m;

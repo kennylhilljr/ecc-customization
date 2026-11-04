@@ -36,9 +36,11 @@ flowchart LR
 | [bin/ecc-kit](bin/ecc-kit) | Creates, compares and syncs project templates |
 | [bin/ecc-snapshot](bin/ecc-snapshot) | Captures selected user settings; optionally invokes the external OpenClaw backup tool |
 | [bin/openclaw-gh-app-token](bin/openclaw-gh-app-token) | Prints a GitHub installation token for the `openclaw-ops-assist` App (bash) |
+| [bin/openclaw-gh-command-drain](bin/openclaw-gh-command-drain) | Verifies queued `@openclaw` GitHub commands with the GitHub API and wakes the ops agent ([lib/gh_command_drain.py](lib/gh_command_drain.py)) |
 | [openclaw-plugins/github-event-router/](openclaw-plugins/github-event-router/README.md) | OpenClaw plugin that queues GitHub Slack app posts for issue-worker-bots and pr-review-bots; installed by hand, not by `bootstrap.sh` |
 | [machine/ops/](machine/ops/workspace-ops.settings.json) | Tracked Claude Code settings for the OpenClaw ops agent, merged by the `ops` step |
-| [tests/](tests/) | `unittest` tests for the `ops` step, the settings merge and the token command |
+| [machine/launchd/](machine/launchd/com.kennylhilljr.openclaw-gh-command.plist) | Hand-maintained launchd job for the command drain; installed by hand, not by `bootstrap.sh` |
+| [tests/](tests/) | `unittest` tests for the `ops` step, the settings merge, the token command and the command drain |
 | [lib/ecctools.py](lib/ecctools.py) | Python helpers for templates, snapshots, restores, plugin registration and secret scanning |
 | [kit/](kit/) | Agent instructions, build/review skills, lessons ledger and orchestration templates |
 | [skills/](skills/README.md) | Shared ECC operation, EARS notation and product requirements skills; SDD reference documents |
@@ -171,6 +173,36 @@ openclaw-gh-app-token --print-config     # ids only, no network
 
 Two checks need the real machine and are not covered by the tests: once the key is stored, `GH_TOKEN="$(openclaw-gh-app-token)" gh api /installation/repositories` lists the installed repositories, and a sandboxed `git -C <repo> commit` run by the ops agent succeeds without a sandbox override.
 
+### Verified GitHub commands for the ops agent
+
+A GitHub comment body is written by whoever can comment, so a GitHub Slack app post that mentions `@openclaw` never reaches the ops agent directly. The `github-event-router` plugin writes a `command` event file into `~/.local/state/github-events/ops/` instead, and `bin/openclaw-gh-command-drain` (which runs `lib/gh_command_drain.py`) handles it:
+
+1. It gets a token from `~/.local/bin/openclaw-gh-app-token` and lists the comments of the named issue or pull request, of the whole repository when the event has no number, or of every repository the App is installed on when it has no repository. Only comments created from 15 minutes before the event's `received_at` count, so a first run never replays old history.
+2. It keeps comments whose author login is exactly `kennylhilljr` with type `User` and whose body mentions `@openclaw` in any case, skips the ones already delivered, and wakes the ops agent once per comment, oldest first: `openclaw agent --agent ops --message-file FILE --deliver --reply-channel slack --reply-to channel:C0CEMPH1L0N --timeout 600`. The message file holds a fixed header, the comment link, `owner/name#number` and the comment body. It is created mode 0600 in a private temporary folder and deleted afterwards.
+3. A handled event file is deleted. A token, HTTP or network failure, or an agent run that fails or times out, moves the file to `~/.local/state/github-events/ops-deferred/` with an `attempts` count; the 24th attempt moves it to `ops-rejected/` instead. Anything in the queue that is not a valid command event also goes to `ops-rejected/`, except a file that is not JSON yet and was written less than 30 seconds ago. Exit status 1 means something was deferred or given up on.
+
+The drain refuses (exit 2, nothing moved) a queue folder that is a symlink, is not a folder, or is neither the default nor next to the router's `.github-events-queue` marker file, and it refuses when `ops-deferred` or `ops-rejected` is something other than a real folder. A lock file keeps two runs from overlapping. `--dry-run` reads the queue and GitHub and logs what it would do, without agent runs, moves or state writes.
+
+Delivered comment ids are kept in `~/.local/state/openclaw-gh-command-drain/state.json` (`OPENCLAW_GH_COMMAND_STATE_DIR` overrides the folder) as `{"repos": {"owner/name": last_id}, "delivered": {"owner/name": [ids]}}`, with repository names in lower case. The state advances only after `openclaw agent` exits 0. A malformed state file is renamed to `state.json.corrupt-<UTC time>` and the drain starts empty. The token is never printed or logged.
+
+The launchd job [machine/launchd/com.kennylhilljr.openclaw-gh-command.plist](machine/launchd/com.kennylhilljr.openclaw-gh-command.plist) starts the drain when the queue folder has files (`QueueDirectories`), at load, and every hour (`StartInterval` 3600). Each run first moves deferred files older than one hour back into the queue, so the hourly run is what retries them. It logs to `~/Library/Logs/openclaw-gh-command.log`. `bootstrap.sh` does not install it. To install:
+
+```sh
+mkdir -p ~/.local/state/github-events/ops
+cp machine/launchd/com.kennylhilljr.openclaw-gh-command.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.kennylhilljr.openclaw-gh-command.plist
+launchctl print gui/$(id -u)/com.kennylhilljr.openclaw-gh-command
+```
+
+The plist names `/Users/bkh223` paths and the `ecc-customization` checkout under `~/Documents/GitHub`; edit them for another account. To roll back:
+
+```sh
+launchctl bootout gui/$(id -u)/com.kennylhilljr.openclaw-gh-command
+rm ~/Library/LaunchAgents/com.kennylhilljr.openclaw-gh-command.plist
+```
+
+Not verified on the real machine: `openclaw agent` started from launchd needs the local OpenClaw Gateway to be running and reachable with the job's `PATH` and `HOME`, and the Gateway must be able to read the message file from the drain's temporary folder. Preview a real queue safely with `bin/openclaw-gh-command-drain --dry-run`; it still calls the token command and the GitHub API.
+
 ### Scaffold a project
 
 Create the destination directory first. This example uses shell checks as illustrative project gates; replace them with the destination project's actual commands.
@@ -240,13 +272,13 @@ The Python restore refuses an existing destination and unsafe archive members. I
 
 ## Testing
 
-There is no CI workflow or coverage report. `tests/` holds `unittest` tests for the `ops` step, `merge-settings` and `openclaw-gh-app-token`; they use temporary home folders and fake `security` and `curl` commands, so they need neither the Keychain nor the network. Run them and the smoke checks from the repository root with Bash, a POSIX shell, Git, OpenSSL and Python 3.9+:
+There is no CI workflow or coverage report. `tests/` holds `unittest` tests for the `ops` step, `merge-settings`, `openclaw-gh-app-token` and `openclaw-gh-command-drain` (`tests/test_gh_command_drain.py`); they use temporary home folders, fake `security`, `curl`, token and `openclaw` commands and a fake GitHub API, so they need neither the Keychain nor the network. Run them and the smoke checks from the repository root with Bash, a POSIX shell, Git, OpenSSL and Python 3.9+:
 
 ```sh
 python3 -m unittest discover -s tests
 bash -n bootstrap.sh stack.conf bin/openclaw-gh-app-token
-sh -n bin/ecc bin/ecc-kit bin/ecc-snapshot .githooks/pre-commit
-python3 -m py_compile lib/ecctools.py
+sh -n bin/ecc bin/ecc-kit bin/ecc-snapshot bin/openclaw-gh-command-drain .githooks/pre-commit
+python3 -m py_compile lib/ecctools.py lib/gh_command_drain.py
 python3 lib/ecctools.py --help
 python3 lib/ecctools.py kit-new --help
 bin/ecc-kit new --help

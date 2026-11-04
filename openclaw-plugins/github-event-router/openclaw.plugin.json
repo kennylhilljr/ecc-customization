@@ -1,7 +1,7 @@
 {
   "id": "github-event-router",
   "name": "GitHub Event Router",
-  "description": "Claims GitHub Slack app posts in the GitHub feed channel and writes one queue file per issue or pull request event for issue-worker-bots and pr-review-bots. Posts that contain @openclaw go to the normal agent turn.",
+  "description": "Claims every message in the GitHub feed channel except the owner's. GitHub app posts become queue files for issue-worker-bots, pr-review-bots and the verified-command drain; no GitHub post reaches an agent turn directly.",
   "categories": [
     "developer-tools"
   ],
@@ -19,7 +19,16 @@
       },
       "queueRoot": {
         "type": "string",
-        "description": "Absolute directory that holds the iwb/ and prbot/ queues (default ~/.local/state/github-events)."
+        "description": "Absolute directory that holds the iwb/, prbot/ and ops/ queues (default ~/.local/state/github-events)."
+      },
+      "ownerSenderIds": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "pattern": "^[UW][A-Z0-9]{6,}$"
+        },
+        "maxItems": 16,
+        "description": "Slack user ids whose messages get the normal agent turn. Defaults to channels.slack.allowFrom."
       },
       "botSenderIds": {
         "type": "array",

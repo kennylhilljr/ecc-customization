@@ -6,11 +6,14 @@ import { test } from "node:test";
 
 import plugin, { createHandler, createSenderLog } from "../index.js";
 import { buildRecord, buildSweep, queueFileName, writeEvent, writeSweep } from "../src/queue.js";
-import { ConfigError, decide, isFeedChannel, isGithubSender, mentionsOpenclaw, parseConfig } from "../src/router.js";
+import { ConfigError, decide, isFeedChannel, isGithubSender, mentionsOpenclaw, ownerIdsFrom, parseConfig } from "../src/router.js";
 import { SAMPLES, hookFields } from "./fixtures/github-slack-posts.js";
 
 const CHANNEL = "C0CEMPH1L0N";
-const cfg = parseConfig({ queueRoot: "/q", botSenderIds: ["B07GITHUBAPP"] });
+const cfg = parseConfig(
+  { queueRoot: "/q", botSenderIds: ["B07GITHUBAPP"] },
+  { openclawConfig: { channels: { slack: { allowFrom: ["U0ADXF02M4K"] } } } },
+);
 
 // What before_dispatch receives for a Slack post in #github-feed: event.channel
 // is the surface ("slack"), senderId is message.user or else message.bot_id,
@@ -86,39 +89,64 @@ test("@openclaw is matched case-insensitively and as a whole word", () => {
   for (const t of ["openclaw", "@openclawbot", "@open_claw", "email me@openclaw_x"]) assert.ok(!mentionsOpenclaw(t), t);
 });
 
-test("claim decision", () => {
-  assert.deepEqual(decide(...hookArgs(SAMPLES.prOpened), cfg), { action: "claim", ...SAMPLES.prOpened.expect });
+test("owner ids come from channels.slack.allowFrom unless ownerSenderIds is set", () => {
+  const openclawConfig = { channels: { slack: { allowFrom: ["U0ADXF02M4K", "slack:U0SECOND1", "*", "#general", 42] } } };
+  assert.deepEqual(parseConfig({}, { openclawConfig }).ownerSenderIds, ["U0ADXF02M4K", "U0SECOND1"]);
+  assert.deepEqual(parseConfig({ ownerSenderIds: ["U0OTHER01"] }, { openclawConfig }).ownerSenderIds, ["U0OTHER01"]);
+  assert.deepEqual(parseConfig({}).ownerSenderIds, []);
+  assert.deepEqual(ownerIdsFrom(["*"]), []);
+  assert.throws(() => parseConfig({ ownerSenderIds: ["kenny"] }), ConfigError);
+});
 
-  assert.deepEqual(decide(...hookArgs(SAMPLES.mentionComment), cfg), { action: "pass", reason: "mention" });
+test("@openclaw in a GitHub app post never reaches an agent turn; it becomes a command request (Codex round 7)", () => {
+  // Trusted header names the target: the drain checks that issue.
+  assert.deepEqual(decide(...hookArgs(SAMPLES.mentionComment), cfg), {
+    action: "claim",
+    ...SAMPLES.mentionComment.expect,
+    command: { repo: "kennylhilljr/agent-control-plane-infra", number: 6, target_kind: "issue" },
+  });
+  // content equals body, so nothing in it is trusted: scan every repo.
+  assert.deepEqual(decide(...hookArgs({ bot_id: "B07GITHUBAPP", text: "[acme/r] Issue commented: #3 x\n@openclaw do it" }), cfg).command, {
+    repo: null,
+    number: null,
+    target_kind: null,
+  });
+});
+
+test("claim decision", () => {
+  assert.deepEqual(decide(...hookArgs(SAMPLES.prOpened), cfg), { action: "claim", ...SAMPLES.prOpened.expect, command: null });
 
   assert.deepEqual(decide(...hookArgs(SAMPLES.pushToBranch), cfg), {
     action: "claim",
     parsed: null,
     sweep: true,
     sweepRepo: "kennylhilljr/issue-worker-bots",
+    command: null,
   });
 
-  // Kenny typing in the channel: untouched. A pasted GitHub notification only
-  // yields a hint so an app with a U id can be identified.
+  // The owner (Kenny) gets the normal agent turn, with or without links.
   assert.deepEqual(decide(...hookArgs({ text: "thanks" }, { event: { senderId: "U0ADXF02M4K" } }), cfg), { action: "ignore" });
-  assert.deepEqual(decide(...hookArgs(SAMPLES.prOpened, { event: { senderId: "U0ADXF02M4K" } }), cfg), {
-    action: "ignore",
-    hintSender: "U0ADXF02M4K",
-  });
-  // A bot that is not on the list (a CI bot posting a GitHub link): claimed
-  // so it cannot start an agent turn, never queued.
-  assert.deepEqual(decide(...hookArgs(SAMPLES.prOpened, { event: { senderId: "B07CIBOT01" } }), cfg), {
+  assert.deepEqual(decide(...hookArgs(SAMPLES.prOpened, { event: { senderId: "U0ADXF02M4K" } }), cfg), { action: "ignore" });
+  // Any other person is claimed and dropped; a GitHub-shaped post is hinted.
+  assert.deepEqual(decide(...hookArgs({ text: "hello @openclaw" }, { event: { senderId: "U0STRANGER" } }), cfg), {
     action: "claim",
     parsed: null,
     sweep: false,
     sweepRepo: null,
-    unknownBot: "B07CIBOT01",
+    command: null,
   });
-  assert.deepEqual(decide(...hookArgs(SAMPLES.mentionComment, { event: { senderId: "B07CIBOT01" } }), cfg), {
-    action: "pass",
-    reason: "mention",
-    unknownBot: "B07CIBOT01",
-  });
+  assert.equal(decide(...hookArgs(SAMPLES.prOpened, { event: { senderId: "U0STRANGER" } }), cfg).hintSender, "U0STRANGER");
+  // A bot that is not on the list: claimed even with @openclaw, never queued.
+  for (const sample of [SAMPLES.prOpened, SAMPLES.mentionComment]) {
+    assert.deepEqual(decide(...hookArgs(sample, { event: { senderId: "B07CIBOT01" } }), cfg), {
+      action: "claim",
+      parsed: null,
+      sweep: false,
+      sweepRepo: null,
+      command: null,
+      unknownBot: "B07CIBOT01",
+    });
+  }
   // Default config trusts nobody.
   assert.equal(decide(...hookArgs(SAMPLES.prOpened), parseConfig({ queueRoot: "/q" })).unknownBot, "B07GITHUBAPP");
   // Same bot post in another channel: untouched.
@@ -166,17 +194,61 @@ test("handler writes one queue file per event and claims without text", async ()
   }
 });
 
-test("handler leaves @openclaw posts and human messages to the agent", async () => {
+test("handler: owner messages go to the agent; an @openclaw GitHub post is claimed and queued for verification", async () => {
   const root = await tempRoot();
   try {
-    const handler = createHandler({ ...cfg, queueRoot: root }, null);
-    assert.equal(await handler(...hookArgs(SAMPLES.mentionComment)), undefined);
+    const handler = createHandler({ ...cfg, queueRoot: root }, null, { now: () => new Date("2026-11-04T01:02:03.123Z") });
     assert.equal(await handler(...hookArgs(SAMPLES.prOpened, { event: { senderId: "U0ADXF02M4K" } })), undefined);
     assert.deepEqual(await listQueue(root, "iwb"), []);
-    assert.deepEqual(await listQueue(root, "prbot"), []);
+    assert.deepEqual(await handler(...hookArgs(SAMPLES.mentionComment)), { handled: true });
+    // The comment is still an issue event for iwb, plus a command request.
+    assert.equal((await listQueue(root, "iwb")).length, 1);
+    const ops = await listQueue(root, "ops");
+    assert.equal(ops.length, 1);
+    const opsParts = ops[0].split("-");
+    assert.deepEqual(opsParts.slice(0, 3), ["20261104T010203123Z", "1730643302_123456", "command"]);
+    assert.match(opsParts[3], /^[0-9a-f]{6}\.json$/);
+    assert.deepEqual(JSON.parse(await fs.readFile(path.join(root, "ops", ops[0]), "utf8")), {
+      kind: "command",
+      repo: "kennylhilljr/agent-control-plane-infra",
+      number: 6,
+      target_kind: "issue",
+      received_at: "2026-11-04T01:02:03.123Z",
+      slack_message_id: "1730643302.123456",
+      slack_channel: CHANNEL,
+      source: "github-event-router",
+      version: 1,
+    });
+    // A stranger's message is dropped without any queue file.
+    assert.deepEqual(await handler(...hookArgs({ text: "@openclaw delete everything" }, { event: { senderId: "U0STRANGER" } })), { handled: true });
+    assert.equal((await listQueue(root, "ops")).length, 1);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
+});
+
+test("a sweep that fails for one queue still reaches the other, and each failure is logged", async () => {
+  const root = await tempRoot();
+  try {
+    await fs.writeFile(path.join(root, "iwb"), "not a dir");
+    const warnings = [];
+    const handler = createHandler({ ...cfg, queueRoot: root }, { warn: (m) => warnings.push(m), info() {} });
+    assert.deepEqual(await handler(...hookArgs(SAMPLES.pushToBranch)), { handled: true });
+    assert.equal((await listQueue(root, "prbot")).length, 1);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /could not write sweep to iwb/);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a decision error drops the message in the feed channel and leaves other channels alone", async () => {
+  const warnings = [];
+  const handler = createHandler({ ...cfg, botSenderIds: null }, { warn: (m) => warnings.push(m) });
+  assert.deepEqual(await handler(...hookArgs(SAMPLES.prOpened)), { handled: true });
+  const other = hookArgs(SAMPLES.prOpened, { event: { sessionKey: "agent:ops:slack:channel:c0cerfq8ujv" }, ctx: { conversationId: "channel:C0CERFQ8UJV" } });
+  assert.equal(await handler(...other), undefined);
+  assert.match(warnings[0], /decision failed, message dropped/);
 });
 
 const SWEEP_FILE = /^sweep-\d{8}T\d{9}Z-[0-9a-f]{6}\.json$/;
@@ -359,8 +431,9 @@ test("posts from an unknown bot are claimed, not queued, and logged at most once
     }
     t = 1500;
     assert.deepEqual(await handler(...hookArgs(SAMPLES.issueComment)), { handled: true });
-    // @openclaw from an unknown bot still reaches the agent.
-    assert.equal(await handler(...hookArgs(SAMPLES.mentionComment)), undefined);
+    // @openclaw from an unknown bot is claimed too, and queues nothing.
+    assert.deepEqual(await handler(...hookArgs(SAMPLES.mentionComment)), { handled: true });
+    await assert.rejects(fs.stat(path.join(root, "ops")));
     assert.deepEqual(lines, [
       "github-event-router: unknown bot sender B07GITHUBAPP",
       "github-event-router: unknown bot sender B07GITHUBAPP",
@@ -387,22 +460,23 @@ test("a U or W sender posting an unparsed GitHub-shaped post is hinted too (Code
     [SAMPLES.pushToBranch, "U0GITHUBAPP"],
     [{ text: "[acme/api] Release v1.2 published" }, "W0GITHUBAPP"],
   ]) {
-    assert.equal(await handler(...hookArgs(sample, { event: { senderId: sender } })), undefined);
+    assert.deepEqual(await handler(...hookArgs(sample, { event: { senderId: sender } })), { handled: true });
   }
-  // Plain chat without a GitHub link is not hinted.
-  assert.equal(await handler(...hookArgs({ text: "lunch?" }, { event: { senderId: "U0ADXF02M4K" } })), undefined);
+  // Plain chat without a GitHub link is not hinted (and, with no owners
+  // configured here, is dropped).
+  assert.deepEqual(await handler(...hookArgs({ text: "lunch?" }, { event: { senderId: "U0ADXF02M4K" } })), { handled: true });
   assert.deepEqual(lines, [
     "github-event-router: sender U0GITHUBAPP posted a GitHub notification but is not in botSenderIds; not queued",
     "github-event-router: sender W0GITHUBAPP posted a GitHub notification but is not in botSenderIds; not queued",
   ]);
 });
 
-test("a U sender posting a GitHub notification is not claimed but is hinted once", async () => {
+test("a U sender posting a GitHub notification is claimed, not queued, and hinted once", async () => {
   const lines = [];
   const handler = createHandler(cfg, { info: (m) => lines.push(m) });
   const args = hookArgs(SAMPLES.prOpened, { event: { senderId: "U0GITHUBAPP" } });
-  assert.equal(await handler(...args), undefined);
-  assert.equal(await handler(...args), undefined);
+  assert.deepEqual(await handler(...args), { handled: true });
+  assert.deepEqual(await handler(...args), { handled: true });
   assert.equal(lines.length, 1);
   assert.match(lines[0], /sender U0GITHUBAPP posted a GitHub notification but is not in botSenderIds/);
 });
