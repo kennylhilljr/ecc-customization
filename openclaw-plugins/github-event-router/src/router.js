@@ -117,8 +117,9 @@ export function analyzePost(event) {
  *   {action: "pass", reason: string, unknownBot?: string} |
  *   {action: "claim", parsed: object | null, sweep: boolean, sweepRepo: string | null, unknownBot?: string}}
  *   ignore: not ours, return undefined. hintSender is set when a sender that
- *     is neither listed nor a B id posted something that parses as a GitHub
- *     notification, so the operator can tell whether it is the app.
+ *     is neither listed nor a B id posted something GitHub-shaped (a
+ *     github.com/owner/repo link or an "[owner/repo]" line), parsed or not,
+ *     so the operator can tell whether it is the app.
  *   pass: let the normal agent turn run (the post contains @openclaw).
  *   claim: return { handled: true }. Queue parsed when it is not null, and a
  *     sweep (full pass) when sweep is true.
@@ -137,9 +138,18 @@ export function decide(event, ctx, cfg) {
     if (mentionsOpenclaw(text)) return { action: "pass", reason: "mention", unknownBot: sender };
     return { action: "claim", parsed: null, sweep: false, sweepRepo: null, unknownBot: sender };
   }
-  // Possibly a person (Kenny), or an app whose posts carry a U id.
-  if (sender && analyzePost(event).parsed) return { action: "ignore", hintSender: sender };
+  // Possibly a person (Kenny), or an app whose posts carry a U or W id. The
+  // before_dispatch event in 2026.9.6 carries no bot_id, subtype or app id
+  // (PluginHookBeforeDispatchEvent/Context in openclaw's d.ts, filled in
+  // dist/dispatch-from-config-*.mjs), so the text is the only clue.
+  if (sender && isGithubShaped(text)) return { action: "ignore", hintSender: sender };
   return { action: "ignore" };
+}
+
+const GITHUB_SHAPED_RE = /https?:\/\/(?:www\.)?github\.com\/[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}|^[*_\s]*\[[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}\]/m;
+
+export function isGithubShaped(text) {
+  return typeof text === "string" && GITHUB_SHAPED_RE.test(text);
 }
 
 export function queueFor(kind) {

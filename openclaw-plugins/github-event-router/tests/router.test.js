@@ -179,14 +179,19 @@ test("handler leaves @openclaw posts and human messages to the agent", async () 
   }
 });
 
-test("unparsable posts from the app are claimed, sampled, and become one debounced sweep per consumer", async () => {
+const SWEEP_FILE = /^sweep-\d{8}T\d{9}Z-[0-9a-f]{6}\.json$/;
+
+test("unparsable posts from the app are claimed, sampled, and become a sweep request per consumer", async () => {
   const root = await tempRoot();
   try {
     const handler = createHandler({ ...cfg, queueRoot: root }, null, { now: () => new Date("2026-11-03T15:00:00.000Z") });
     assert.deepEqual(await handler(...hookArgs(SAMPLES.pushToBranch)), { handled: true });
-    assert.deepEqual(await listQueue(root, "iwb"), ["sweep.json"]);
-    assert.deepEqual(await listQueue(root, "prbot"), ["sweep.json"]);
-    const sweep = JSON.parse(await fs.readFile(path.join(root, "iwb", "sweep.json"), "utf8"));
+    const [iwbSweep] = await listQueue(root, "iwb");
+    const [prbotSweep] = await listQueue(root, "prbot");
+    assert.match(iwbSweep, SWEEP_FILE);
+    assert.match(prbotSweep, SWEEP_FILE);
+    assert.ok(iwbSweep.startsWith("sweep-20261103T150000000Z-"));
+    const sweep = JSON.parse(await fs.readFile(path.join(root, "iwb", iwbSweep), "utf8"));
     assert.deepEqual(sweep, {
       kind: "sweep",
       repo: "kennylhilljr/issue-worker-bots",
@@ -196,14 +201,16 @@ test("unparsable posts from the app are claimed, sampled, and become one debounc
       source: "github-event-router",
       version: 1,
     });
-    // A second post for the same repo replaces it; still one file each.
+    // Every request is its own file; nothing is overwritten. The consumers
+    // coalesce what they find.
     await handler(...hookArgs(SAMPLES.pushToBranch));
-    assert.deepEqual(await listQueue(root, "iwb"), ["sweep.json"]);
-    // A post with no known repo widens the pending sweep to all repos.
     await handler(...hookArgs(SAMPLES.issueOpenedAttachmentOnly));
     for (const q of ["iwb", "prbot"]) {
-      assert.deepEqual(await listQueue(root, q), ["sweep.json"]);
-      assert.equal(JSON.parse(await fs.readFile(path.join(root, q, "sweep.json"), "utf8")).repo, null);
+      const names = await listQueue(root, q);
+      assert.equal(names.length, 3);
+      assert.ok(names.every((n) => SWEEP_FILE.test(n)), names.join(","));
+      const repos = await Promise.all(names.map(async (n) => JSON.parse(await fs.readFile(path.join(root, q, n), "utf8")).repo));
+      assert.deepEqual(repos.sort(), ["kennylhilljr/issue-worker-bots", "kennylhilljr/issue-worker-bots", null].sort());
     }
     const lines = (await fs.readFile(path.join(root, "unparsed.jsonl"), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
     assert.equal(lines.length, 3);
@@ -224,22 +231,36 @@ test("a target from content-equals-body text is queued together with a sweep", a
     assert.deepEqual(await handler(...hookArgs(SAMPLES.prMerged)), { handled: true });
     const prbot = await listQueue(root, "prbot");
     assert.equal(prbot.length, 2);
-    assert.ok(prbot.includes("sweep.json"));
+    assert.equal(prbot.filter((n) => SWEEP_FILE.test(n)).length, 1);
     assert.ok(prbot.some((n) => n.includes("-pull_request-16-merged-")));
-    assert.deepEqual(await listQueue(root, "iwb"), ["sweep.json"]);
+    const iwb = await listQueue(root, "iwb");
+    assert.equal(iwb.length, 1);
+    assert.match(iwb[0], SWEEP_FILE);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
 });
 
-test("writeSweep keeps a matching repo and widens a different one", async () => {
+test("concurrent sweeps for different repos are all kept (Codex round 6)", async () => {
   const root = await tempRoot();
   try {
-    await writeSweep(root, buildSweep({ repo: "o/r", messageId: "1.1", channelId: CHANNEL }));
-    await writeSweep(root, buildSweep({ repo: "o/r", messageId: "1.2", channelId: CHANNEL }));
-    assert.equal(JSON.parse(await fs.readFile(path.join(root, "prbot", "sweep.json"), "utf8")).repo, "o/r");
-    await writeSweep(root, buildSweep({ repo: "o/s", messageId: "1.3", channelId: CHANNEL }));
-    assert.equal(JSON.parse(await fs.readFile(path.join(root, "prbot", "sweep.json"), "utf8")).repo, null);
+    const now = new Date("2026-11-03T15:00:00.000Z");
+    await Promise.all([
+      writeSweep(root, buildSweep({ repo: "acme/api", messageId: "1.1", channelId: CHANNEL, now })),
+      writeSweep(root, buildSweep({ repo: "acme/web", messageId: "1.2", channelId: CHANNEL, now })),
+    ]);
+    for (const q of ["iwb", "prbot"]) {
+      const names = await listQueue(root, q);
+      assert.equal(names.length, 2, q);
+      const repos = await Promise.all(names.map(async (n) => JSON.parse(await fs.readFile(path.join(root, q, n), "utf8")).repo));
+      assert.deepEqual(repos.sort(), ["acme/api", "acme/web"]);
+    }
+    // A consumer deleting the sweeps it claimed cannot remove a newer one.
+    const claimed = await listQueue(root, "prbot");
+    await writeSweep(root, buildSweep({ repo: "acme/api", messageId: "1.3", channelId: CHANNEL, now }));
+    for (const n of claimed) await fs.rm(path.join(root, "prbot", n));
+    assert.equal((await listQueue(root, "prbot")).length, 1);
+    assert.deepEqual(await fs.readdir(path.join(root, ".tmp")), []);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
@@ -357,6 +378,23 @@ test("sender log tracks a bounded number of ids", () => {
   const log = createSenderLog({ info: (m) => lines.push(m) }, { intervalMs: 1000, clock: () => 0 });
   for (let i = 0; i < 200; i++) log(`B0BOT${String(i).padStart(4, "0")}`, `line ${i}`);
   assert.equal(lines.length, 64);
+});
+
+test("a U or W sender posting an unparsed GitHub-shaped post is hinted too (Codex round 6)", async () => {
+  const lines = [];
+  const handler = createHandler(parseConfig({ queueRoot: "/q" }), { info: (m) => lines.push(m) });
+  for (const [sample, sender] of [
+    [SAMPLES.pushToBranch, "U0GITHUBAPP"],
+    [{ text: "[acme/api] Release v1.2 published" }, "W0GITHUBAPP"],
+  ]) {
+    assert.equal(await handler(...hookArgs(sample, { event: { senderId: sender } })), undefined);
+  }
+  // Plain chat without a GitHub link is not hinted.
+  assert.equal(await handler(...hookArgs({ text: "lunch?" }, { event: { senderId: "U0ADXF02M4K" } })), undefined);
+  assert.deepEqual(lines, [
+    "github-event-router: sender U0GITHUBAPP posted a GitHub notification but is not in botSenderIds; not queued",
+    "github-event-router: sender W0GITHUBAPP posted a GitHub notification but is not in botSenderIds; not queued",
+  ]);
 });
 
 test("a U sender posting a GitHub notification is not claimed but is hinted once", async () => {

@@ -6,9 +6,9 @@ It registers one `before_dispatch` hook. For a message in that channel:
 
 1. If the text contains `@openclaw` (any case), the hook does nothing and the normal ops agent turn runs, as today.
 2. If the sender is listed in `botSenderIds` (the GitHub app), the hook returns `{ handled: true }`, so no model turn runs, and queues work. When the post's own text names an issue or pull request, it writes one event file: issues to `~/.local/state/github-events/iwb/`, pull requests to `~/.local/state/github-events/prbot/`.
-3. When it cannot name a precise target (a branch push, a release, a post whose link OpenClaw dropped), it writes a sweep instead: `sweep.json` in both `iwb/` and `prbot/`, which asks each consumer for a full pass, limited to one repo when the post's own text names exactly one. It also appends the post's `content` and `body` (600 characters each) to `~/.local/state/github-events/unparsed.jsonl` (capped at 1 MB) so real fixtures can be added later. The router therefore never depends on parsing: every GitHub app post leads to either a targeted event or a sweep.
+3. When it cannot name a precise target (a branch push, a release, a post whose link OpenClaw dropped), it writes a sweep request instead, one file in each of `iwb/` and `prbot/`, which asks each consumer for a full pass, limited to one repo when the post's own text names exactly one. It also appends the post's `content` and `body` (600 characters each) to `~/.local/state/github-events/unparsed.jsonl` (capped at 1 MB) so real fixtures can be added later. The router therefore never depends on parsing: every GitHub app post leads to either a targeted event or a sweep.
 4. If the sender is some other Slack bot (a `B…` id not in `botSenderIds`), it claims the message so it cannot start a paid agent turn, queues nothing, and logs `github-event-router: unknown bot sender <id>`. The line is logged at most once per sender every 10 minutes, for at most 64 distinct ids.
-5. Messages from people are not claimed. If a sender that is neither listed nor a `B…` id posts something that parses as a GitHub notification, the hook logs `github-event-router: sender <id> posted a GitHub notification but is not in botSenderIds; not queued` (same rate limit) and leaves the message alone. This covers an app whose posts carry a `U…` id.
+5. Messages from people are not claimed. If a sender that is neither listed nor a `B…` id posts something GitHub-shaped (a `github.com/OWNER/REPO` link or a line starting with `[OWNER/REPO]`), parsed or not, the hook logs `github-event-router: sender <id> posted a GitHub notification but is not in botSenderIds; not queued` (same rate limit) and leaves the message alone. This covers an app whose posts carry a `U…` or `W…` id. In 2026.9.6 the `before_dispatch` event and context carry only the sender id, with no `bot_id`, subtype or app id, so the text is the only clue. Kenny pasting a GitHub link also triggers this line, at most once per 10 minutes.
 
 `botSenderIds` has no default. Until it is set, nothing is queued: GitHub app posts fall under rule 4. If the queue write fails, the hook logs a warning and still claims the post; the hourly backstop scan picks the item up.
 
@@ -24,13 +24,13 @@ Each file is written to `<queueRoot>/.tmp/` and renamed into the queue directory
 {"repo":"kennylhilljr/issue-worker-bots","kind":"pull_request","number":17,"event":"opened","received_at":"2026-11-03T14:15:02.123Z","slack_message_id":"1730643302.123456","slack_channel":"C0CEMPH1L0N","source":"github-event-router","version":1}
 ```
 
-A sweep has a fixed name, `sweep.json`, and is replaced atomically, so at most one is pending per consumer. If a pending sweep names a different repo, the new one covers all repos (`"repo": null`):
+Each sweep request gets its own name, `sweep-<UTC time>-<6 hex>.json` (for example `sweep-20261103T150000000Z-3fa9c1.json`), and is published the same way. The router never reads or replaces a pending sweep, so two posts arriving together cannot overwrite or narrow each other, and a consumer deleting the sweeps it handled cannot remove one that arrived meanwhile. `"repo": null` means all repos:
 
 ```json
 {"kind":"sweep","repo":"kennylhilljr/issue-worker-bots","received_at":"2026-11-03T15:00:00.000Z","slack_message_id":"1730643302.123456","slack_channel":"C0CEMPH1L0N","source":"github-event-router","version":1}
 ```
 
-`iwb tick --from-queue` and `prbot watch --from-queue` treat a sweep as "run the full pass" for that repo (or all repos) after the per-item events, and delete it once the pass succeeds.
+`iwb tick --from-queue` and `prbot watch --from-queue` recognize sweeps by content (`"kind": "sweep"`), not by name. Each run coalesces all the sweep requests it finds into one full pass, after the per-item events, scoped to the union of their repos (all repos if any says `null`), and deletes exactly the files it claimed once the pass succeeds.
 
 `event` is one of `opened`, `reopened`, `closed`, `merged`, `ready_for_review`, `review_requested`, `review`, `review_comment`, `comment`, `synchronize`, `labeled`, `assigned`, `edited` or `unknown`. It is read from the post's header line and link fragment, so treat it as a hint: the consumers (`iwb tick --from-queue`, `prbot watch --from-queue`) fetch the current issue or pull request from GitHub before acting.
 

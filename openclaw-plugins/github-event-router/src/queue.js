@@ -64,8 +64,12 @@ export async function writeEvent(root, record, { fsImpl = fs } = {}) {
   return publish(root, queueFor(record.kind), queueFileName(record), record, fsImpl);
 }
 
-export const SWEEP_NAME = "sweep.json";
 export const SWEEP_QUEUES = ["iwb", "prbot"];
+
+// sweep-20261103T150000000Z-3fa9c1.json: unique, sorts by time.
+export function sweepFileName(sweep, rand = crypto.randomBytes(3).toString("hex")) {
+  return `sweep-${compactTimestamp(sweep.received_at)}-${rand}.json`;
+}
 
 export function buildSweep({ repo, messageId, channelId, now = new Date() }) {
   return {
@@ -80,21 +84,17 @@ export function buildSweep({ repo, messageId, channelId, now = new Date() }) {
 }
 
 /**
- * Ask both consumers for a full pass. One fixed name per queue, replaced
- * atomically, so at most one sweep is pending. If a pending sweep names a
- * different repo, the new one covers all repos (repo null).
+ * Ask both consumers for a full pass by publishing a uniquely named sweep
+ * request into each queue (temp file, then rename). Nothing is read or
+ * replaced, so concurrent sweeps cannot overwrite or narrow each other, and
+ * a consumer deleting the sweeps it claimed cannot drop a newer one. The
+ * consumers recognize sweeps by content (kind "sweep") and coalesce every
+ * pending sweep they claim into one pass.
  */
 export async function writeSweep(root, sweep, { fsImpl = fs } = {}) {
   const written = [];
   for (const queue of SWEEP_QUEUES) {
-    let record = sweep;
-    try {
-      const pending = JSON.parse(await fsImpl.readFile(path.join(root, queue, SWEEP_NAME), "utf8"));
-      if (pending?.kind === "sweep" && pending.repo !== sweep.repo) record = { ...sweep, repo: null };
-    } catch {
-      // none pending, or unreadable: the new sweep replaces it
-    }
-    written.push(await publish(root, queue, SWEEP_NAME, record, fsImpl));
+    written.push(await publish(root, queue, sweepFileName(sweep), sweep, fsImpl));
   }
   return written;
 }
