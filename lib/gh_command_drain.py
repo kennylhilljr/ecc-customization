@@ -27,6 +27,11 @@ before failing; only a run that could not be started at all clears it.
 Such a run also sends a short alert to Slack with `openclaw message send`;
 a failed alert is only logged.
 
+Only comments created from 15 minutes before to 2 minutes after the event's
+received_at count, and "@openclaw" must be a whole handle (MENTION, the same
+pattern the router uses). Each run first replays the router's failed-request
+journal (ops-failed.jsonl next to the queue) into the queue.
+
 Before the first agent run of a drain run, `openclaw health` checks that the
 local Gateway answers. If it does not, no pending entry is written, the agent
 is not started, and the event is deferred.
@@ -54,7 +59,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 TRUSTED_LOGIN = "kennylhilljr"
-MENTION = "@openclaw"
+# the same pattern as the router's: "@openclaw" as a whole handle, not inside an email address,
+# a longer handle (@openclawbot) or a domain (@openclaw.com); trailing punctuation is fine
+MENTION = re.compile(r"(?<![A-Za-z0-9_.+-])@openclaw(?![A-Za-z0-9_-])(?!\.[A-Za-z0-9])", re.I)
 REPLY_CHANNEL = "C0CEMPH1L0N"
 ALERT_CHANNEL = "C0CERFQ8UJV"    # where a run with an unknown outcome is reported
 HEALTH_TIMEOUT_MS = 5000         # passed to `openclaw health --timeout`
@@ -65,6 +72,9 @@ AGENT_KILL_AFTER = 660       # subprocess timeout, a bit above the agent's own
 TOKEN_TIMEOUT = 60
 HTTP_TIMEOUT = 30
 WINDOW = timedelta(minutes=15)   # comments created this long before received_at still count
+AFTER_RECEIVED = timedelta(minutes=2)   # and up to this long after it (clock skew, Slack delay)
+FAILED_JOURNAL = "ops-failed.jsonl"     # command requests the router could not publish
+REPLAYING = re.compile(r"^\.ops-failed\.replaying-[A-Za-z0-9_-]+\.jsonl$")
 MAX_ATTEMPTS = 24            # deferrals before an event file is given up on and rejected
 QUEUE_SETTLE = 30            # seconds an unparsable file is left alone in case it is still being written
 CLOCK_SKEW = 300             # an mtime up to this far in the future still counts as just written
@@ -228,7 +238,11 @@ def parse_time(value):
 def parse_event(path):
     """The event dict when path holds a valid command event, None when it is JSON but not one.
     Raises ValueError when it is not JSON at all."""
-    ev = json.loads(path.read_text())
+    return validate_event(json.loads(path.read_text()))
+
+
+def validate_event(ev):
+    """ev when it is a valid command event, else None."""
     if not isinstance(ev, dict) or ev.get("kind") != "command":
         return None
     repo, n = ev.get("repo"), ev.get("number")
@@ -444,8 +458,8 @@ class GitHub:
         return out
 
 
-def select(comments, repo, window_start, state):
-    """Trusted @openclaw comments created in the window and not yet delivered, oldest first.
+def select(comments, repo, window_start, window_end, state):
+    """Trusted @openclaw comments created in [window_start, window_end] and not yet delivered, oldest first.
     comments holds (source, comment) pairs. Each item is (time, source, id, repo, number, html_url, body)."""
     picked = {}
     for source, c in comments:
@@ -454,10 +468,10 @@ def select(comments, repo, window_start, state):
             continue
         if isinstance(cid, bool) or not isinstance(cid, int) or not isinstance(body, str) or not body.strip():
             continue
-        if MENTION not in body.lower():
+        if not MENTION.search(body):
             continue
         created = parse_time(c.get("submitted_at" if source == REVIEW else "created_at"))
-        if created is None or created < window_start:
+        if created is None or not window_start <= created <= window_end:
             continue
         if source == ISSUE_COMMENT:
             m = ISSUE_URL_NUMBER.search(str(c.get("issue_url", "")))
@@ -560,6 +574,164 @@ def send_alert(url, detail, run):
         log(f"alert: openclaw message send exited {r.returncode}")
 
 
+# ---------------------------------------------------------------- failed-request journal
+
+def compact_timestamp(iso_text):
+    """The router's file name prefix: 2026-11-03T14:15:02.123Z -> 20261103T141502123Z."""
+    return re.sub(r"[-:.]", "", iso_text)
+
+
+def safe_part(value):
+    return (re.sub(r"[^A-Za-z0-9_-]+", "_", str(value))[:80]) or "x"
+
+
+def publish_event(root, qdir, ev):
+    """Write ev into qdir the way the router does: a temporary file in <root>/.tmp, then os.replace."""
+    tmpdir = root / ".tmp"
+    tmpdir.mkdir(mode=0o700, exist_ok=True)
+    qdir.mkdir(mode=0o700, exist_ok=True)
+    while True:
+        name = (f"{compact_timestamp(ev['received_at'])}-{safe_part(ev.get('slack_message_id') or 'nots')}"
+                f"-command-{os.urandom(3).hex()}.json")
+        if not os.path.lexists(qdir / name):
+            break
+    fd, tmp = tempfile.mkstemp(dir=tmpdir, prefix=".command-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            json.dump(ev, fh)
+            fh.write("\n")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, qdir / name)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
+    return name
+
+
+def unique_path(path):
+    stem, suffix, i, target = path.stem, path.suffix, 0, path
+    while os.path.lexists(target):
+        i += 1
+        target = path.with_name(f"{stem}-{i}{suffix}")
+    return target
+
+
+def write_lines_atomic(path, lines):
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            fh.write("".join(line + "\n" for line in lines))
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def replay_one(root, qdir, path):
+    """Publish every valid line of one replaying file and reject the rest. True when done, in which case
+    the file is deleted. On a failure the unpublished lines stay in the file for the next run."""
+    try:
+        lines = [line for line in path.read_text().splitlines() if line.strip()]
+    except (OSError, UnicodeDecodeError) as e:
+        log(f"replay: could not read {path.name} ({e}); leaving it for the next run")
+        return False
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    rejects, published = [], 0
+    for i, line in enumerate(lines):
+        try:
+            ev = validate_event(json.loads(line))
+        except ValueError:
+            ev = None
+        if ev is None:
+            log(f"replay: {path.name} line {i + 1} is not a valid command request; rejecting it")
+            rejects.append(line)
+            continue
+        try:
+            publish_event(root, qdir, ev)
+            published += 1
+        except OSError as e:
+            log(f"replay: could not publish {path.name} line {i + 1} ({e.strerror or e}); "
+                f"leaving the rest for the next run")
+            try:
+                if rejects:
+                    rejected = sibling(qdir, "rejected")
+                    rejected.mkdir(parents=True, exist_ok=True)
+                    write_lines_atomic(unique_path(rejected / f"ops-failed-{stamp}.jsonl"), rejects)
+                write_lines_atomic(path, lines[i:])
+            except OSError as e2:
+                log(f"replay: could not shorten {path.name} ({e2.strerror or e2}); "
+                    f"lines already published may be published again (repeats are harmless)")
+            return False
+    try:
+        if rejects:
+            rejected = sibling(qdir, "rejected")
+            rejected.mkdir(parents=True, exist_ok=True)
+            write_lines_atomic(unique_path(rejected / f"ops-failed-{stamp}.jsonl"), rejects)
+        os.unlink(path)
+    except OSError as e:
+        log(f"replay: could not finish {path.name} ({e.strerror or e}); leaving it for the next run")
+        return False
+    log(f"replay: {path.name}: published {published}, rejected {len(rejects)}")
+    return True
+
+
+def replay_failed(qdir, dry_run):
+    """Turn the router's failed-request journal back into queue events. The journal is renamed first, so
+    the router's later appends start a fresh file and are never lost; leftovers from an earlier run that
+    did not finish are replayed too. Returns False when something is left for the next run."""
+    root = qdir.parent
+    journal = root / FAILED_JOURNAL
+    try:
+        mode = os.lstat(journal).st_mode
+    except FileNotFoundError:
+        mode = None
+    ok = True
+    if mode is not None:
+        if not stat.S_ISREG(mode):
+            log(f"replay: {journal} is not a regular file; {'would move' if dry_run else 'moving'} it "
+                f"to {sibling(qdir, 'rejected')}")
+            if not dry_run:
+                try:
+                    move_into(journal, sibling(qdir, "rejected"))
+                except OSError as e:
+                    log(f"replay: could not move {journal.name} ({e.strerror or e})")
+                    ok = False
+        elif dry_run:
+            log(f"replay: would replay {journal}")
+        else:
+            stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+            try:
+                os.replace(journal, unique_path(root / f".ops-failed.replaying-{stamp}.jsonl"))
+            except OSError as e:
+                log(f"replay: could not rename {journal} ({e.strerror or e})")
+                ok = False
+    try:
+        names = sorted(os.listdir(root))
+    except FileNotFoundError:
+        names = []
+    for name in names:
+        path = root / name
+        if not REPLAYING.match(name):
+            continue
+        try:
+            if not stat.S_ISREG(os.lstat(path).st_mode):
+                continue
+        except FileNotFoundError:
+            continue
+        if dry_run:
+            log(f"replay: would replay {path.name}")
+            continue
+        ok = replay_one(root, qdir, path) and ok
+    return ok
+
+
 # ---------------------------------------------------------------- the run
 
 def lock(sdir):
@@ -633,13 +805,14 @@ def drain(qdir, dry_run, gh, run, now):
         if state is None:
             state = load_state(state_path, dry_run)
         window_start = parse_time(ev["received_at"]) - WINDOW
+        window_end = parse_time(ev["received_at"]) + AFTER_RECEIVED  # a retry hours later must not reach newer comments
         since = window_start.strftime("%Y-%m-%dT%H:%M:%SZ")
         try:
             repos = [ev["repo"]] if ev["repo"] is not None else gh.installation_repos()
             picked = []
             for repo in repos:
                 picked += select(gh.comments(repo, ev["number"], ev.get("target_kind"), since),
-                                 repo, window_start, state)
+                                 repo, window_start, window_end, state)
         except GitHubError as e:
             log(f"github: {path.name}: {e}")
             defer(path, ev, "GitHub lookup failed")
@@ -733,12 +906,14 @@ def main(argv=None, http_get=None, run=None):
             return 2
         if args.retry_pending:
             retry_pending(args.dry_run)
+        replayed = replay_failed(qdir, args.dry_run)
         if not qdir.exists():
-            return 0
+            return 0 if replayed else 1
         now = time.time()
         if not args.dry_run:
             requeue_deferred(qdir, now)
-        return drain(qdir, args.dry_run, GitHub(http_get, run), run, now)
+        code = drain(qdir, args.dry_run, GitHub(http_get, run), run, now)
+        return code if replayed else max(code, 1)
 
 
 if __name__ == "__main__":

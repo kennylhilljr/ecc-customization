@@ -7,9 +7,12 @@ import { extractRepo, parseGithubPost } from "./parse.js";
 
 export const DEFAULT_CHANNEL_ID = "C0CEMPH1L0N";
 
-// Same intent as the ops agent's mentionPatterns ("@[Oo]pen[Cc]law\b"), but
-// case-insensitive as asked.
-const OPENCLAW_MENTION = /@openclaw(?![A-Za-z0-9_])/i;
+// "@openclaw" as a mention, any case: not inside an email address or a longer
+// name ("me@openclaw.com", "@openclawbot", "@openclaw-bot"), but trailing
+// punctuation is fine ("@OpenClaw,", "@openclaw."). lib/gh_command_drain.py
+// uses the same pattern; tests/fixtures/mention-cases.json is shared by both
+// test suites.
+export const OPENCLAW_MENTION = /(?<![A-Za-z0-9_.+-])@openclaw(?![A-Za-z0-9_-])(?!\.[A-Za-z0-9])/i;
 
 export class ConfigError extends Error {}
 

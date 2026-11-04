@@ -127,6 +127,15 @@ export async function writeCommand(root, command, { fsImpl = fs } = {}) {
   return publish(root, COMMAND_QUEUE, name, command, fsImpl);
 }
 
+// Fallback when a command request cannot be published. The drain renames
+// this file before replaying it, so appends made meanwhile are never lost.
+export const COMMAND_JOURNAL = "ops-failed.jsonl";
+
+export async function appendCommandJournal(root, command, { fsImpl = fs } = {}) {
+  await fsImpl.mkdir(root, { recursive: true, mode: 0o700 });
+  await fsImpl.appendFile(path.join(root, COMMAND_JOURNAL), `${JSON.stringify(command)}\n`, { mode: 0o600 });
+}
+
 async function publish(root, queue, name, record, fsImpl) {
   const queueDir = path.join(root, queue);
   const tmpDir = path.join(root, ".tmp");

@@ -12,12 +12,14 @@ import subprocess
 import tempfile
 import time
 import unittest
+import re
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WRAPPER = os.path.join(ROOT, "bin", "openclaw-gh-command-drain")
+MENTION_CASES = os.path.join(ROOT, "openclaw-plugins", "github-event-router", "tests", "fixtures", "mention-cases.json")
 spec = importlib.util.spec_from_file_location("gh_command_drain", os.path.join(ROOT, "lib", "gh_command_drain.py"))
 drain = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(drain)
@@ -671,6 +673,133 @@ class DrainTest(unittest.TestCase):
         code, _ = self.run_drain(routes={"/repos/octo/app/issues/7/comments": []})
         self.assertEqual(code, 0, self.output)
         self.assertEqual(self.health_checks(), [])
+
+    # ---- mention matching and the time window
+    def test_mention_cases_shared_with_router(self):
+        with open(MENTION_CASES) as fh:
+            cases = json.load(fh)
+        self.assertTrue(cases["match"] and cases["no_match"])
+        for text in cases["match"]:
+            with self.subTest(match=text):
+                self.assertIsNotNone(drain.MENTION.search(text))
+        for text in cases["no_match"]:
+            with self.subTest(no_match=text):
+                self.assertIsNone(drain.MENTION.search(text))
+
+    def test_mention_must_be_whole_handle(self):
+        self.event()
+        routes = {"/repos/octo/app/issues/7/comments": [comment(800, "ping @openclawbot"),
+                                                         comment(801, "mail me@openclaw.com"),
+                                                         comment(802, "ok (@OpenClaw), go")]}
+        code, _ = self.run_drain(routes=routes)
+        self.assertEqual(code, 0, self.output)
+        self.assertEqual(self.delivered(), ["issue_comment:802"])
+
+    def test_retry_hours_later_ignores_newer_comments(self):
+        path = self.event()
+        os.makedirs(self.deferred)
+        deferred = os.path.join(self.deferred, os.path.basename(path))
+        os.replace(path, deferred)
+        os.utime(deferred, (time.time() - 3 * 3600, time.time() - 3 * 3600))
+        routes = {"/repos/octo/app/issues/7/comments": [
+            comment(810, "@openclaw three hours later", created="2026-11-04T04:02:03Z"),
+            comment(811, "@openclaw just past the slack", created="2026-11-04T01:04:04Z"),
+            comment(812, "@openclaw within the slack", created="2026-11-04T01:04:03Z")]}
+        code, _ = self.run_drain(routes=routes)
+        self.assertEqual(code, 0, self.output)
+        self.assertEqual(self.delivered(), ["issue_comment:812"])
+        self.assertEqual(self.listing(self.deferred), [])
+
+    # ---- replay of the router's failed-request journal
+    def journal_line(self, **extra):
+        ev = {"kind": "command", "repo": "octo/app", "number": 7, "target_kind": "issue",
+              "received_at": RECEIVED, "slack_message_id": "1730643302.123456", "slack_channel": "C0CEMPH1L0N",
+              "source": "github-event-router", "version": 1}
+        ev.update(extra)
+        return json.dumps(ev)
+
+    def write_journal(self, *lines, name="ops-failed.jsonl"):
+        with open(os.path.join(self.root, name), "w") as fh:
+            fh.write("".join(line + "\n" for line in lines))
+
+    def replaying(self):
+        return [n for n in self.listing(self.root) if n.startswith(".ops-failed.replaying-")]
+
+    def test_replay_publishes_events_and_rejects_bad_lines(self):
+        self.write_journal(self.journal_line(), "not json", self.journal_line(number=8, slack_message_id=None),
+                           json.dumps({"kind": "command", "repo": "bad"}))
+        code, gh = self.run_drain(env={"FAKE_TOKEN_EXIT": "1"})  # so the published events stay visible
+        self.assertEqual(code, 1)
+        self.assertFalse(os.path.exists(os.path.join(self.root, "ops-failed.jsonl")))
+        self.assertEqual(self.replaying(), [])
+        names = self.listing(self.deferred)
+        self.assertEqual(len(names), 2)
+        stamp, tail = drain.compact_timestamp(RECEIVED), r"-command-[0-9a-f]{6}\.json$"
+        self.assertEqual(stamp, "20261104T010203123Z")
+        for slack_part in ("1730643302_123456", "nots"):
+            self.assertTrue(any(re.match("^" + stamp + "-" + slack_part + tail, n) for n in names), slack_part)
+        rejected, = self.listing(self.rejected)
+        self.assertTrue(re.match(r"^ops-failed-\d{8}T\d{6}Z\.jsonl$", rejected))
+        with open(os.path.join(self.rejected, rejected)) as fh:
+            self.assertEqual(fh.read(), 'not json\n{"kind": "command", "repo": "bad"}\n')
+        self.assertEqual(self.listing(os.path.join(self.root, ".tmp")), [])
+
+    def test_replayed_event_is_drained(self):
+        self.write_journal(self.journal_line())
+        code, _ = self.run_drain(routes={"/repos/octo/app/issues/7/comments": [comment(820)]})
+        self.assertEqual(code, 0, self.output)
+        self.assertEqual(self.delivered(), ["issue_comment:820"])
+        self.assertEqual(self.listing(self.queue), [])
+
+    def test_line_appended_during_replay_survives(self):
+        self.write_journal(self.journal_line())
+        real = drain.replay_one
+
+        def router_appends(root, qdir, path):
+            self.write_journal(self.journal_line(number=9))  # the router starts a fresh journal
+            return real(root, qdir, path)
+        with mock.patch.object(drain, "replay_one", router_appends):
+            self.run_drain(env={"FAKE_TOKEN_EXIT": "1"})
+        self.assertEqual(len(self.listing(self.deferred)), 1)
+        with open(os.path.join(self.root, "ops-failed.jsonl")) as fh:
+            self.assertIn('"number": 9', fh.read())
+        self.run_drain(env={"FAKE_TOKEN_EXIT": "1"})
+        self.assertFalse(os.path.exists(os.path.join(self.root, "ops-failed.jsonl")))
+        self.assertEqual(len(self.listing(self.deferred)), 2)
+
+    def test_publish_failure_keeps_rest_for_next_run(self):
+        self.write_journal(self.journal_line(number=1), "garbage", self.journal_line(number=2),
+                           self.journal_line(number=3))
+        real, calls = drain.publish_event, []
+
+        def fail_second(root, qdir, ev):
+            calls.append(ev["number"])
+            if len(calls) == 2:
+                raise OSError(28, "No space left on device")
+            return real(root, qdir, ev)
+        with mock.patch.object(drain, "publish_event", fail_second):
+            code, _ = self.run_drain(env={"FAKE_TOKEN_EXIT": "1"})
+        self.assertEqual(code, 1)
+        self.assertIn("could not publish", self.output)
+        left, = self.replaying()
+        with open(os.path.join(self.root, left)) as fh:
+            self.assertEqual([json.loads(line)["number"] for line in fh.read().splitlines()], [2, 3])
+        self.assertEqual(len(self.listing(self.rejected)), 1)  # "garbage"
+        self.assertEqual(len(self.listing(self.deferred)), 1)
+        self.run_drain(env={"FAKE_TOKEN_EXIT": "1"})
+        self.assertEqual(self.replaying(), [])
+        self.assertEqual(len(self.listing(self.deferred)), 3)
+        self.assertEqual(len(self.listing(self.rejected)), 1)
+
+    def test_replay_dry_run_changes_nothing(self):
+        self.write_journal(self.journal_line())
+        self.write_journal(self.journal_line(), name=".ops-failed.replaying-20261104T000000Z.jsonl")
+        before = self.listing(self.root)
+        code, _ = self.run_drain("--dry-run")
+        self.assertEqual(code, 0, self.output)
+        self.assertIn("would replay", self.output)
+        self.assertEqual(self.listing(self.root), before)
+        self.assertEqual(self.listing(self.queue), [])
 
     # ---- dedupe by explicit keys only
     def test_deferred_lower_id_on_another_issue_still_delivered(self):

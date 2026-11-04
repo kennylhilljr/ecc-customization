@@ -84,9 +84,12 @@ test("GitHub sender: only an explicit botSenderIds entry counts, no default", ()
   assert.ok(!isGithubSender({ senderId: "B07OTHERBOT" }, {}, ["B07GITHUBAPP"]));
 });
 
-test("@openclaw is matched case-insensitively and as a whole word", () => {
-  for (const t of ["@openclaw do it", "hey @OpenClaw.", "@OPENCLAW", "x\n@OpenClaw: ping"]) assert.ok(mentionsOpenclaw(t), t);
-  for (const t of ["openclaw", "@openclawbot", "@open_claw", "email me@openclaw_x"]) assert.ok(!mentionsOpenclaw(t), t);
+test("@openclaw matching follows the case file shared with the command drain", async () => {
+  const cases = JSON.parse(await fs.readFile(new URL("./fixtures/mention-cases.json", import.meta.url), "utf8"));
+  for (const t of cases.match) assert.ok(mentionsOpenclaw(t), JSON.stringify(t));
+  for (const t of cases.no_match) assert.ok(!mentionsOpenclaw(t), JSON.stringify(t));
+  assert.ok(cases.no_match.includes("me@openclaw.com") && cases.no_match.includes("@openclawbot"));
+  assert.ok(cases.match.includes("@OpenClaw,"));
 });
 
 test("owner ids come from channels.slack.allowFrom unless ownerSenderIds is set", () => {
@@ -481,12 +484,74 @@ test("a U sender posting a GitHub notification is claimed, not queued, and hinte
   assert.match(lines[0], /sender U0GITHUBAPP posted a GitHub notification but is not in botSenderIds/);
 });
 
-test("register wires one before_dispatch handler, and none on bad config", () => {
+test("register wires one before_dispatch handler", () => {
   const calls = [];
   plugin.register({ pluginConfig: { queueRoot: "/tmp/q" }, logger: null, on: (name, fn) => calls.push([name, typeof fn]) });
   assert.deepEqual(calls, [["before_dispatch", "function"]]);
-  const none = [];
-  plugin.register({ pluginConfig: { queueRoot: "relative" }, logger: { warn() {} }, on: (n) => none.push(n) });
-  assert.deepEqual(none, []);
   assert.equal(plugin.id, "github-event-router");
+});
+
+test("bad config fails closed: a hook still drops every feed message except the owner's (Codex round 10)", async () => {
+  const hooks = [];
+  const errors = [];
+  plugin.register({
+    pluginConfig: { queueRoot: "relative", botSenderIds: ["B07GITHUBAPP"] },
+    config: { channels: { slack: { allowFrom: ["U0ADXF02M4K"] } } },
+    logger: { error: (m) => errors.push(m), warn() {}, info() {} },
+    on: (name, fn) => hooks.push([name, fn]),
+  });
+  assert.equal(hooks.length, 1);
+  assert.equal(hooks[0][0], "before_dispatch");
+  assert.match(errors[0], /queueRoot must be an absolute path.*dropped until the config is fixed/);
+  const hook = hooks[0][1];
+  assert.deepEqual(await hook(...hookArgs(SAMPLES.prOpened)), { handled: true });
+  assert.deepEqual(await hook(...hookArgs(SAMPLES.mentionComment)), { handled: true });
+  assert.deepEqual(await hook(...hookArgs({ text: "hi" }, { event: { senderId: "U0STRANGER" } })), { handled: true });
+  assert.equal(await hook(...hookArgs({ text: "hi" }, { event: { senderId: "U0ADXF02M4K" } })), undefined);
+  const other = hookArgs(SAMPLES.prOpened, { event: { sessionKey: "agent:ops:slack:channel:c0cerfq8ujv" }, ctx: { conversationId: "channel:C0CERFQ8UJV" } });
+  assert.equal(await hook(...other), undefined);
+});
+
+test("a command request that cannot be published is saved to ops-failed.jsonl (Codex round 10)", async () => {
+  const root = await tempRoot();
+  try {
+    const errors = [];
+    const handler = createHandler({ ...cfg, queueRoot: root }, { error: (m) => errors.push(m), info() {}, warn() {} }, {
+      command: async () => {
+        throw new Error("ops is not a directory");
+      },
+      now: () => new Date("2026-11-04T05:00:00.000Z"),
+    });
+    assert.deepEqual(await handler(...hookArgs(SAMPLES.mentionComment)), { handled: true });
+    await handler(...hookArgs(SAMPLES.mentionComment));
+    const lines = (await fs.readFile(path.join(root, "ops-failed.jsonl"), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
+    assert.equal(lines.length, 2);
+    assert.deepEqual(lines[0], {
+      kind: "command",
+      repo: "kennylhilljr/agent-control-plane-infra",
+      number: 6,
+      target_kind: "issue",
+      received_at: "2026-11-04T05:00:00.000Z",
+      slack_message_id: "1730643302.123456",
+      slack_channel: CHANNEL,
+      source: "github-event-router",
+      version: 1,
+    });
+    assert.equal(errors.length, 2);
+    assert.match(errors[0], /could not write command request \(ops is not a directory\); saved it to ops-failed\.jsonl/);
+    // A journal failure is logged and the post is still claimed.
+    const lost = [];
+    const broken = createHandler({ ...cfg, queueRoot: root }, { error: (m) => lost.push(m), info() {} }, {
+      command: async () => {
+        throw new Error("a");
+      },
+      journal: async () => {
+        throw new Error("b");
+      },
+    });
+    assert.deepEqual(await broken(...hookArgs(SAMPLES.mentionComment)), { handled: true });
+    assert.match(lost[0], /it is lost/);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
 });

@@ -1,0 +1,19 @@
+{
+  "match": [
+    "@openclaw",
+    "@OpenClaw,",
+    "hey @OpenClaw.",
+    "x\n@OpenClaw: ping",
+    "@OPENCLAW do it",
+    "(@openclaw)"
+  ],
+  "no_match": [
+    "@openclawbot",
+    "me@openclaw.com",
+    "openclaw",
+    "@open_claw",
+    "@openclaw.com",
+    "email me@openclaw_x",
+    "@openclaw-bot"
+  ]
+}
