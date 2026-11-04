@@ -1,0 +1,10 @@
+#!/bin/sh
+# openclaw-gh-command-drain [--queue DIR] [--dry-run] [--retry-pending]
+#
+# Drain the verified-command queue (default ~/.local/state/github-events/ops):
+# for each command event the github-event-router plugin wrote, ask the GitHub
+# API for recent comments, keep those kennylhilljr wrote that mention
+# @openclaw, and wake the OpenClaw ops agent with each one. launchd runs it
+# (machine/launchd/com.kennylhilljr.openclaw-gh-command.plist).
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+exec python3 "$HERE/lib/gh_command_drain.py" "$@"
