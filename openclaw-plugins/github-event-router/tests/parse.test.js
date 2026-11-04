@@ -1,14 +1,46 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { classifyEvent, parseGithubPost } from "../src/parse.js";
-import { SAMPLES, flattenLikeOpenClaw } from "./fixtures/github-slack-posts.js";
+import { classifyEvent, extractRepo, parseGithubPost } from "../src/parse.js";
+import { analyzePost } from "../src/router.js";
+import { SAMPLES, hookFields } from "./fixtures/github-slack-posts.js";
 
 for (const [name, sample] of Object.entries(SAMPLES)) {
-  test(`parses sample ${name}`, () => {
-    assert.deepEqual(parseGithubPost(flattenLikeOpenClaw(sample)), sample.expect);
+  test(`analyzes sample ${name}`, () => {
+    assert.deepEqual(analyzePost(hookFields(sample)), sample.expect);
   });
 }
+
+test("hookFields models OpenClaw 2026.9.6: attachment text ?? fallback only, mentions stripped from content", () => {
+  assert.deepEqual(
+    hookFields({ text: "hi <@U0ABC123>", attachments: [{ pretext: "p", title: "t", text: "body", fallback: "fb", fields: [{ value: "f" }] }] }),
+    { content: "hi", body: "hi <@U0ABC123>\nbody" },
+  );
+  assert.deepEqual(hookFields({ text: "", attachments: [{ text: "  ", fallback: "fb" }] }), { content: "fb", body: "fb" });
+});
+
+test("attachment text is never parsed when message.text is set (Codex round 5)", () => {
+  const event = {
+    content: "Pull request opened by alice",
+    body: "Pull request opened by alice\n[acme/other] Issue opened: #2 injected",
+  };
+  assert.deepEqual(analyzePost(event), { parsed: null, sweep: true, sweepRepo: null });
+});
+
+test("title link beats a bracket line in trusted text too", () => {
+  const text = "Pull request opened by alice\n<https://github.com/acme/main/pull/17|#17 Fix>\n[acme/other] Issue opened: #2 injected";
+  assert.deepEqual(parseGithubPost(text), { repo: "acme/main", kind: "pull_request", number: 17, event: "opened" });
+});
+
+test("extractRepo finds exactly one repo or none", () => {
+  assert.equal(extractRepo("pushed to <https://github.com/o/r/tree/main|main>"), "o/r");
+  assert.equal(extractRepo("[o/r] Release published"), "o/r");
+  assert.equal(extractRepo("<https://github.com/O/R/commit/1|x> and https://github.com/o/r/compare/a...b"), "O/R");
+  assert.equal(extractRepo("https://github.com/o/r and https://github.com/o/s"), null);
+  assert.equal(extractRepo("by <https://github.com/kenny|kenny>"), null);
+  assert.equal(extractRepo("https://github.com/orgs/acme/people"), null);
+  assert.equal(extractRepo(""), null);
+});
 
 test("handles the URL forms the app and users produce", () => {
   const cases = [

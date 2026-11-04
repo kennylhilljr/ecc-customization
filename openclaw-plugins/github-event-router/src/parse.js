@@ -153,16 +153,17 @@ function fromHeaderShortRef(header) {
 }
 
 /**
- * Only the notification itself names the target. In order:
+ * Parse trusted notification text: the message's own text (header and title
+ * lines), never attachment body text. The caller decides what is trusted;
+ * see analyzePost in router.js. In order:
  *   1. an issue or pull request link in the header (first non-empty line);
- *   2. a line that is exactly the structured fallback
+ *   2. a title link whose label starts with the same number;
+ *   3. a line that is exactly the structured fallback
  *      "[owner/repo] Issue|Pull request <action>: #N Title";
- *   3. a title link whose label starts with the same number;
  *   4. "Issue|Pull request ... owner/repo#N" in the header.
- * Anything else, such as links or bracket text inside an issue or comment
- * body, is ignored, and a post with none of these stays unparsed.
+ * A post with none of these stays unparsed.
  *
- * @param {string} text combined event.content and event.body
+ * @param {string} text trusted header/title text
  * @returns {{repo: string, kind: "issue"|"pull_request", number: number, event: string} | null}
  */
 export function parseGithubPost(text) {
@@ -175,14 +176,38 @@ export function parseGithubPost(text) {
   if (headerUrl) return fromUrl(headerUrl, header, header);
 
   for (const line of lines) {
-    const got = fromBracketLine(line, header);
-    if (got) return got;
-  }
-
-  for (const line of lines) {
     const m = earliest(line, URL_RE);
     if (m && isTitleLine(line, m)) return fromUrl(m, header, line);
   }
 
+  for (const line of lines) {
+    const got = fromBracketLine(line, header);
+    if (got) return got;
+  }
+
   return fromHeaderShortRef(header);
+}
+
+const ANY_REPO_URL_RE = new RegExp(`https?://(?:www\\.)?github\\.com/(${OWNER})/(${REPO})(?=[/|>\\s]|$)`, "gi");
+const BRACKET_PREFIX_RE = new RegExp(`^[*_\\s]*\\[(${OWNER})/(${REPO})\\]`, "gm");
+const NOT_REPOS = new Set(["orgs", "settings", "notifications", "marketplace", "apps", "sponsors", "topics", "users"]);
+
+/**
+ * The single repository that trusted text points at (any github.com/OWNER/REPO
+ * link, or a "[owner/repo]" line prefix), or null when there is none or more
+ * than one. Used to scope a sweep.
+ */
+export function extractRepo(text) {
+  if (typeof text !== "string" || !text.trim()) return null;
+  const body = unescapeSlack(text);
+  const seen = new Map(); // lower case -> first spelling seen
+  for (const re of [ANY_REPO_URL_RE, BRACKET_PREFIX_RE]) {
+    re.lastIndex = 0;
+    for (let m = re.exec(body); m; m = re.exec(body)) {
+      if (!validRepoName(m[2]) || NOT_REPOS.has(m[1].toLowerCase())) continue;
+      const repo = `${m[1]}/${m[2]}`;
+      if (!seen.has(repo.toLowerCase())) seen.set(repo.toLowerCase(), repo);
+    }
+  }
+  return seen.size === 1 ? [...seen.values()][0] : null;
 }

@@ -5,8 +5,8 @@ An OpenClaw plugin that turns GitHub Slack app posts in `#github-feed` (Slack ch
 It registers one `before_dispatch` hook. For a message in that channel:
 
 1. If the text contains `@openclaw` (any case), the hook does nothing and the normal ops agent turn runs, as today.
-2. If the sender is listed in `botSenderIds` (the GitHub app), it parses repo, kind (issue or pull request), number and event from the post, writes one JSON file, and returns `{ handled: true }`, so no model turn runs. Issues go to `~/.local/state/github-events/iwb/`, pull requests to `~/.local/state/github-events/prbot/`.
-3. If a listed sender's post names no issue or pull request (a branch push, a release, a subscribe acknowledgement), it still claims the message, writes nothing to the queues and appends a 600 character sample to `~/.local/state/github-events/unparsed.jsonl` (capped at 1 MB) so the real shapes can be checked later.
+2. If the sender is listed in `botSenderIds` (the GitHub app), the hook returns `{ handled: true }`, so no model turn runs, and queues work. When the post's own text names an issue or pull request, it writes one event file: issues to `~/.local/state/github-events/iwb/`, pull requests to `~/.local/state/github-events/prbot/`.
+3. When it cannot name a precise target (a branch push, a release, a post whose link OpenClaw dropped), it writes a sweep instead: `sweep.json` in both `iwb/` and `prbot/`, which asks each consumer for a full pass, limited to one repo when the post's own text names exactly one. It also appends the post's `content` and `body` (600 characters each) to `~/.local/state/github-events/unparsed.jsonl` (capped at 1 MB) so real fixtures can be added later. The router therefore never depends on parsing: every GitHub app post leads to either a targeted event or a sweep.
 4. If the sender is some other Slack bot (a `B…` id not in `botSenderIds`), it claims the message so it cannot start a paid agent turn, queues nothing, and logs `github-event-router: unknown bot sender <id>`. The line is logged at most once per sender every 10 minutes, for at most 64 distinct ids.
 5. Messages from people are not claimed. If a sender that is neither listed nor a `B…` id posts something that parses as a GitHub notification, the hook logs `github-event-router: sender <id> posted a GitHub notification but is not in botSenderIds; not queued` (same rate limit) and leaves the message alone. This covers an app whose posts carry a `U…` id.
 
@@ -24,6 +24,14 @@ Each file is written to `<queueRoot>/.tmp/` and renamed into the queue directory
 {"repo":"kennylhilljr/issue-worker-bots","kind":"pull_request","number":17,"event":"opened","received_at":"2026-11-03T14:15:02.123Z","slack_message_id":"1730643302.123456","slack_channel":"C0CEMPH1L0N","source":"github-event-router","version":1}
 ```
 
+A sweep has a fixed name, `sweep.json`, and is replaced atomically, so at most one is pending per consumer. If a pending sweep names a different repo, the new one covers all repos (`"repo": null`):
+
+```json
+{"kind":"sweep","repo":"kennylhilljr/issue-worker-bots","received_at":"2026-11-03T15:00:00.000Z","slack_message_id":"1730643302.123456","slack_channel":"C0CEMPH1L0N","source":"github-event-router","version":1}
+```
+
+`iwb tick --from-queue` and `prbot watch --from-queue` treat a sweep as "run the full pass" for that repo (or all repos) after the per-item events, and delete it once the pass succeeds.
+
 `event` is one of `opened`, `reopened`, `closed`, `merged`, `ready_for_review`, `review_requested`, `review`, `review_comment`, `comment`, `synchronize`, `labeled`, `assigned`, `edited` or `unknown`. It is read from the post's header line and link fragment, so treat it as a hint: the consumers (`iwb tick --from-queue`, `prbot watch --from-queue`) fetch the current issue or pull request from GitHub before acting.
 
 Each write also creates `<queueRoot>/.github-events-queue` if it is missing. The consumers drain a queue directory only when it is their default path or when its parent holds this marker, so a mistyped `--from-queue` path cannot move unrelated files. The marker sits in the root, not inside a queue directory, because launchd keeps a `QueueDirectories` job running while the watched directory has any entry.
@@ -37,16 +45,24 @@ The consumers keep two more directories next to each queue, both outside the dir
 
 ## Parsing
 
-OpenClaw's Slack plugin flattens a bot message before the hook sees it. When `message.text` is set, the hook gets that text plus each attachment's `text` (or `fallback`). When it is empty, the hook gets the attachments' `pretext`, `title`, `text`, `fallback` and fields. Attachment `title_link` and footer links never reach the hook.
+What the hook receives in OpenClaw 2026.9.6 (`@openclaw/slack`, `dist/.setup/pipeline.runtime-BlPOexmJ.mjs`):
 
-Only the notification itself names the target, so the parser looks in this order and stops at the first hit:
+- `event.body` is `message.text` (or the blocks text), then one line per attachment with that attachment's `text`, or its `fallback` when `text` is empty (lines 2953 to 2962 and 2993 to 3001). Attachment `pretext`, `title`, `title_link`, footer and fields never reach the hook.
+- `event.content` is `message.text` with Slack user mentions removed (lines 4090 and 4468; `BodyForCommands` in `openclaw/dist/context-BigCXBTA.mjs:208`). When `message.text` is blank, OpenClaw uses the body instead (`openclaw/dist/message-hook-mappers-RPSrPEKP.mjs:49`).
+
+So attachment text, which for comments and issues is user-written, is only ever in `body`. The router works from that:
+
+- `content` differs from `body`: `message.text` was set and attachments added more. Only `content` is parsed. No target there means a sweep, scoped to the one repo `content` links to, if any.
+- `content` equals `body`: the text is either `message.text` alone or attachment text alone, and the hook cannot tell which. A target found there is queued, and a sweep for all repos is always added, so a target taken from user text can only cause an extra check of that item, never a missed event.
+
+Within the text it parses, the parser looks in this order and stops at the first hit:
 
 1. a `https://github.com/OWNER/REPO/issues/N`, `/pull/N` or `/pulls/N` link in the header (the first non-empty line), bare or in Slack's `<url|label>` form, with any tail such as `/files`, `#issuecomment-…`, `#pullrequestreview-…` or `?w=1`;
-2. a line that is exactly the structured fallback `[OWNER/REPO] Issue <action>: #N Title` or `[OWNER/REPO] Pull request <action>: #N Title`;
-3. a title line: a Slack link to an issue or pull request whose label starts with that number, such as `<https://github.com/o/r/pull/17|#17 Add queue>`;
+2. a title line: a Slack link to an issue or pull request whose label starts with that number, such as `<https://github.com/o/r/pull/17|#17 Add queue>`;
+3. a line that is exactly the structured fallback `[OWNER/REPO] Issue <action>: #N Title` or `[OWNER/REPO] Pull request <action>: #N Title`;
 4. `Issue … OWNER/REPO#N` or `Pull request … OWNER/REPO#N` in the header. A bare reference could be either, so it is skipped.
 
-The kind comes from the link path or from the `Issue` / `Pull request` words in front of the number, never from the title: `[acme/r] Issue opened: #12 Review commit handling` is an issue. The event is also read only from text in front of the number. Links and bracket text anywhere else, such as `See https://github.com/acme/other/issues/2` or `[acme/other] issue #2` in a comment body, are ignored. A post with no target in those places is left unparsed (rule 3 above).
+The kind comes from the link path or from the `Issue` / `Pull request` words in front of the number, never from the title: `[acme/r] Issue opened: #12 Review commit handling` is an issue. The event is also read only from text in front of the number.
 
 ## Configuration
 
@@ -117,10 +133,10 @@ Disabling alone stops the hook. Queue files left behind are harmless. If the que
 npm test    # node --test tests/*.test.js, no network, temp dirs only
 ```
 
-The samples in `tests/fixtures/github-slack-posts.js` follow the GitHub Slack app's attachment layout but were not captured from the live channel.
+The samples in `tests/fixtures/github-slack-posts.js` follow the GitHub Slack app's attachment layout but were not captured from the live channel. `hookFields()` there turns a Slack message into the `content` and `body` pair described under Parsing.
 
 ## Unverified
 
-- The exact shape of the GitHub Slack app's posts in this workspace. If the app sets `message.text` to a header without a link and keeps the issue link only in `title_link`, OpenClaw drops the link and those posts end up in `unparsed.jsonl` (see the `issueOpenedTitleLinkOnly` sample). Check that file after a day of traffic.
+- The exact shape of the GitHub Slack app's posts in this workspace. If the app keeps the issue link only in `title_link`, the router cannot see it and those posts become sweeps (see the `issueOpenedTitleLinkOnly` sample). That is correct but slower to process than a targeted event. Check `unparsed.jsonl` after a day of traffic and add real samples to the fixtures.
 - Whether the app's messages carry a `B…` bot id or a `U…` user id as OpenClaw's sender id. The install steps find out.
 - That `before_dispatch` fires for these posts once `requireMention` is false. This follows from reading the 2026.9.6 Slack and dispatch code, not from a live run.

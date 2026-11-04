@@ -5,9 +5,9 @@ import path from "node:path";
 import { test } from "node:test";
 
 import plugin, { createHandler, createSenderLog } from "../index.js";
-import { buildRecord, queueFileName, writeEvent } from "../src/queue.js";
+import { buildRecord, buildSweep, queueFileName, writeEvent, writeSweep } from "../src/queue.js";
 import { ConfigError, decide, isFeedChannel, isGithubSender, mentionsOpenclaw, parseConfig } from "../src/router.js";
-import { SAMPLES, flattenLikeOpenClaw } from "./fixtures/github-slack-posts.js";
+import { SAMPLES, hookFields } from "./fixtures/github-slack-posts.js";
 
 const CHANNEL = "C0CEMPH1L0N";
 const cfg = parseConfig({ queueRoot: "/q", botSenderIds: ["B07GITHUBAPP"] });
@@ -16,11 +16,11 @@ const cfg = parseConfig({ queueRoot: "/q", botSenderIds: ["B07GITHUBAPP"] });
 // is the surface ("slack"), senderId is message.user or else message.bot_id,
 // messageId is the Slack ts, and ctx.conversationId is the reply target.
 function hookArgs(sample, overrides = {}) {
-  const text = flattenLikeOpenClaw(sample);
+  const { content, body } = hookFields(sample);
   const event = {
     messageId: "1730643302.123456",
-    content: text,
-    body: text,
+    content,
+    body,
     channel: "slack",
     sessionKey: `agent:ops:slack:channel:${CHANNEL.toLowerCase()}`,
     senderId: sample.bot_id,
@@ -87,14 +87,16 @@ test("@openclaw is matched case-insensitively and as a whole word", () => {
 });
 
 test("claim decision", () => {
-  const claim = decide(...hookArgs(SAMPLES.prOpened), cfg);
-  assert.equal(claim.action, "claim");
-  assert.deepEqual(claim.parsed, SAMPLES.prOpened.expect);
+  assert.deepEqual(decide(...hookArgs(SAMPLES.prOpened), cfg), { action: "claim", ...SAMPLES.prOpened.expect });
 
   assert.deepEqual(decide(...hookArgs(SAMPLES.mentionComment), cfg), { action: "pass", reason: "mention" });
 
-  const unparsed = decide(...hookArgs(SAMPLES.subscribeAck), cfg);
-  assert.deepEqual(unparsed, { action: "claim", parsed: null });
+  assert.deepEqual(decide(...hookArgs(SAMPLES.pushToBranch), cfg), {
+    action: "claim",
+    parsed: null,
+    sweep: true,
+    sweepRepo: "kennylhilljr/issue-worker-bots",
+  });
 
   // Kenny typing in the channel: untouched. A pasted GitHub notification only
   // yields a hint so an app with a U id can be identified.
@@ -108,6 +110,8 @@ test("claim decision", () => {
   assert.deepEqual(decide(...hookArgs(SAMPLES.prOpened, { event: { senderId: "B07CIBOT01" } }), cfg), {
     action: "claim",
     parsed: null,
+    sweep: false,
+    sweepRepo: null,
     unknownBot: "B07CIBOT01",
   });
   assert.deepEqual(decide(...hookArgs(SAMPLES.mentionComment, { event: { senderId: "B07CIBOT01" } }), cfg), {
@@ -175,16 +179,67 @@ test("handler leaves @openclaw posts and human messages to the agent", async () 
   }
 });
 
-test("unparsable bot posts are claimed and sampled, not queued", async () => {
+test("unparsable posts from the app are claimed, sampled, and become one debounced sweep per consumer", async () => {
+  const root = await tempRoot();
+  try {
+    const handler = createHandler({ ...cfg, queueRoot: root }, null, { now: () => new Date("2026-11-03T15:00:00.000Z") });
+    assert.deepEqual(await handler(...hookArgs(SAMPLES.pushToBranch)), { handled: true });
+    assert.deepEqual(await listQueue(root, "iwb"), ["sweep.json"]);
+    assert.deepEqual(await listQueue(root, "prbot"), ["sweep.json"]);
+    const sweep = JSON.parse(await fs.readFile(path.join(root, "iwb", "sweep.json"), "utf8"));
+    assert.deepEqual(sweep, {
+      kind: "sweep",
+      repo: "kennylhilljr/issue-worker-bots",
+      received_at: "2026-11-03T15:00:00.000Z",
+      slack_message_id: "1730643302.123456",
+      slack_channel: CHANNEL,
+      source: "github-event-router",
+      version: 1,
+    });
+    // A second post for the same repo replaces it; still one file each.
+    await handler(...hookArgs(SAMPLES.pushToBranch));
+    assert.deepEqual(await listQueue(root, "iwb"), ["sweep.json"]);
+    // A post with no known repo widens the pending sweep to all repos.
+    await handler(...hookArgs(SAMPLES.issueOpenedAttachmentOnly));
+    for (const q of ["iwb", "prbot"]) {
+      assert.deepEqual(await listQueue(root, q), ["sweep.json"]);
+      assert.equal(JSON.parse(await fs.readFile(path.join(root, q, "sweep.json"), "utf8")).repo, null);
+    }
+    const lines = (await fs.readFile(path.join(root, "unparsed.jsonl"), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
+    assert.equal(lines.length, 3);
+    assert.equal(lines[0].slack_message_id, "1730643302.123456");
+    assert.match(lines[0].content, /new commit pushed/);
+    assert.match(lines[0].body, /Merge pull request/);
+    assert.equal(lines[2].body, "(same as content)");
+    assert.deepEqual(await fs.readdir(path.join(root, ".tmp")), []);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a target from content-equals-body text is queued together with a sweep", async () => {
   const root = await tempRoot();
   try {
     const handler = createHandler({ ...cfg, queueRoot: root }, null);
-    assert.deepEqual(await handler(...hookArgs(SAMPLES.pushToBranch)), { handled: true });
-    assert.deepEqual(await listQueue(root, "iwb"), []);
-    assert.deepEqual(await listQueue(root, "prbot"), []);
-    const lines = (await fs.readFile(path.join(root, "unparsed.jsonl"), "utf8")).trim().split("\n");
-    assert.equal(lines.length, 1);
-    assert.equal(JSON.parse(lines[0]).slack_message_id, "1730643302.123456");
+    assert.deepEqual(await handler(...hookArgs(SAMPLES.prMerged)), { handled: true });
+    const prbot = await listQueue(root, "prbot");
+    assert.equal(prbot.length, 2);
+    assert.ok(prbot.includes("sweep.json"));
+    assert.ok(prbot.some((n) => n.includes("-pull_request-16-merged-")));
+    assert.deepEqual(await listQueue(root, "iwb"), ["sweep.json"]);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("writeSweep keeps a matching repo and widens a different one", async () => {
+  const root = await tempRoot();
+  try {
+    await writeSweep(root, buildSweep({ repo: "o/r", messageId: "1.1", channelId: CHANNEL }));
+    await writeSweep(root, buildSweep({ repo: "o/r", messageId: "1.2", channelId: CHANNEL }));
+    assert.equal(JSON.parse(await fs.readFile(path.join(root, "prbot", "sweep.json"), "utf8")).repo, "o/r");
+    await writeSweep(root, buildSweep({ repo: "o/s", messageId: "1.3", channelId: CHANNEL }));
+    assert.equal(JSON.parse(await fs.readFile(path.join(root, "prbot", "sweep.json"), "utf8")).repo, null);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

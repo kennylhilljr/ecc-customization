@@ -11,8 +11,8 @@
 // No runtime dependencies and no SDK import: the default export is the plain
 // object definePluginEntry() returns, as in the ecc-orchestrator plugin.
 
-import { buildRecord, recordUnparsed, writeEvent } from "./src/queue.js";
-import { ConfigError, decide, messageText, parseConfig } from "./src/router.js";
+import { buildRecord, buildSweep, recordUnparsed, writeEvent, writeSweep } from "./src/queue.js";
+import { ConfigError, decide, parseConfig } from "./src/router.js";
 
 export const PLUGIN_ID = "github-event-router";
 
@@ -33,7 +33,11 @@ export function createSenderLog(logger, { intervalMs = SENDER_LOG_INTERVAL_MS, c
   };
 }
 
-export function createHandler(cfg, logger, { write = writeEvent, unparsed = recordUnparsed, now = () => new Date(), senderLog } = {}) {
+export function createHandler(
+  cfg,
+  logger,
+  { write = writeEvent, sweep = writeSweep, unparsed = recordUnparsed, now = () => new Date(), senderLog } = {},
+) {
   const logSender = senderLog ?? createSenderLog(logger);
   return async function beforeDispatch(event, ctx) {
     let decision;
@@ -68,11 +72,21 @@ export function createHandler(cfg, logger, { write = writeEvent, unparsed = reco
       }
     } else {
       try {
-        await unparsed(cfg.queueRoot, { messageId, text: messageText(event), now: now() });
+        await unparsed(cfg.queueRoot, { messageId, content: event?.content, body: event?.body, now: now() });
       } catch {
         // best effort only
       }
-      logger?.info?.(`${PLUGIN_ID}: claimed bot post ${messageId ?? "(no id)"} without a parsable issue or pull request`);
+    }
+    if (decision.sweep) {
+      // The post did not name a target we can trust, so ask both consumers
+      // for a full pass instead of depending on the parser.
+      const record = buildSweep({ repo: decision.sweepRepo, messageId, channelId: cfg.channelId, now: now() });
+      try {
+        await sweep(cfg.queueRoot, record);
+        logger?.info?.(`${PLUGIN_ID}: queued sweep for ${record.repo ?? "all repos"} (post ${messageId ?? "(no id)"})`);
+      } catch (err) {
+        logger?.warn?.(`${PLUGIN_ID}: could not write sweep: ${err?.message ?? err}`);
+      }
     }
     return { handled: true };
   };

@@ -61,13 +61,51 @@ export async function ensureMarker(root, fsImpl = fs) {
 
 // fsImpl lets tests inject failures; it defaults to node:fs/promises.
 export async function writeEvent(root, record, { fsImpl = fs } = {}) {
-  const queueDir = path.join(root, queueFor(record.kind));
+  return publish(root, queueFor(record.kind), queueFileName(record), record, fsImpl);
+}
+
+export const SWEEP_NAME = "sweep.json";
+export const SWEEP_QUEUES = ["iwb", "prbot"];
+
+export function buildSweep({ repo, messageId, channelId, now = new Date() }) {
+  return {
+    kind: "sweep",
+    repo: repo ?? null,
+    received_at: now.toISOString(),
+    slack_message_id: messageId ?? null,
+    slack_channel: channelId,
+    source: "github-event-router",
+    version: 1,
+  };
+}
+
+/**
+ * Ask both consumers for a full pass. One fixed name per queue, replaced
+ * atomically, so at most one sweep is pending. If a pending sweep names a
+ * different repo, the new one covers all repos (repo null).
+ */
+export async function writeSweep(root, sweep, { fsImpl = fs } = {}) {
+  const written = [];
+  for (const queue of SWEEP_QUEUES) {
+    let record = sweep;
+    try {
+      const pending = JSON.parse(await fsImpl.readFile(path.join(root, queue, SWEEP_NAME), "utf8"));
+      if (pending?.kind === "sweep" && pending.repo !== sweep.repo) record = { ...sweep, repo: null };
+    } catch {
+      // none pending, or unreadable: the new sweep replaces it
+    }
+    written.push(await publish(root, queue, SWEEP_NAME, record, fsImpl));
+  }
+  return written;
+}
+
+async function publish(root, queue, name, record, fsImpl) {
+  const queueDir = path.join(root, queue);
   const tmpDir = path.join(root, ".tmp");
   await fsImpl.mkdir(queueDir, { recursive: true, mode: 0o700 });
   await fsImpl.mkdir(tmpDir, { recursive: true, mode: 0o700 });
   await ensureMarker(root, fsImpl);
-  const name = queueFileName(record);
-  const tmp = path.join(tmpDir, `${name}.${process.pid}.tmp`);
+  const tmp = path.join(tmpDir, `${queue}-${name}.${process.pid}.${crypto.randomBytes(3).toString("hex")}.tmp`);
   const dest = path.join(queueDir, name);
   let handle;
   try {
@@ -87,8 +125,13 @@ export async function writeEvent(root, record, { fsImpl = fs } = {}) {
   return dest;
 }
 
-/** Keep a bounded sample of bot posts we could not parse, to learn the real shapes. */
-export async function recordUnparsed(root, { messageId, text, now = new Date() }) {
+/**
+ * Keep a bounded sample of bot posts we could not parse, to learn the real
+ * shapes. content and body are kept apart because they come from different
+ * Slack fields (see analyzePost in router.js).
+ */
+export async function recordUnparsed(root, { messageId, content, body, now = new Date() }) {
+  const clip = (s) => (typeof s === "string" ? s.slice(0, 600) : null);
   const file = path.join(root, "unparsed.jsonl");
   try {
     const st = await fs.stat(file);
@@ -97,6 +140,11 @@ export async function recordUnparsed(root, { messageId, text, now = new Date() }
     // missing is fine
   }
   await fs.mkdir(root, { recursive: true, mode: 0o700 });
-  const line = JSON.stringify({ received_at: now.toISOString(), slack_message_id: messageId ?? null, sample: text.slice(0, 600) });
+  const line = JSON.stringify({
+    received_at: now.toISOString(),
+    slack_message_id: messageId ?? null,
+    content: clip(content),
+    body: content === body ? "(same as content)" : clip(body),
+  });
   await fs.appendFile(file, `${line}\n`, { mode: 0o600 });
 }

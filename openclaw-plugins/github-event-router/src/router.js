@@ -3,7 +3,7 @@
 import os from "node:os";
 import path from "node:path";
 
-import { parseGithubPost } from "./parse.js";
+import { extractRepo, parseGithubPost } from "./parse.js";
 
 export const DEFAULT_CHANNEL_ID = "C0CEMPH1L0N";
 
@@ -76,15 +76,52 @@ export function messageText(event) {
   return parts.join("\n");
 }
 
+function trimmed(s) {
+  return typeof s === "string" ? s.trim() : "";
+}
+
+/**
+ * Split a post into what the GitHub app wrote itself and what came from the
+ * issue or comment, then decide what to queue.
+ *
+ * OpenClaw 2026.9.6 (@openclaw/slack, dist/.setup/pipeline.runtime-*.mjs):
+ *   event.content = message.text with Slack mentions stripped (commandBody);
+ *     when message.text is blank it falls back to the raw body.
+ *   event.body = raw body = message.text (or blocks text), then for a bot
+ *     message each attachment's `text ?? fallback`, one per line.
+ *
+ * So content is trusted header/title text only when it differs from body
+ * (message.text was set and attachments added more): parse content alone and
+ * fall back to a sweep when it names no target.
+ *
+ * When the two are equal, the text is either message.text alone or
+ * attachment text alone, and the hook cannot tell which. A target found
+ * there is still queued, but a sweep (all repos) is always added, so a
+ * target taken from issue or comment text can only cause an extra check of
+ * that item, never a missed event.
+ *
+ * @returns {{parsed: object | null, sweep: boolean, sweepRepo: string | null}}
+ */
+export function analyzePost(event) {
+  const content = trimmed(event?.content);
+  const body = trimmed(event?.body);
+  if (content && body && content !== body) {
+    const parsed = parseGithubPost(content);
+    return { parsed, sweep: !parsed, sweepRepo: parsed ? null : extractRepo(content) };
+  }
+  return { parsed: parseGithubPost(content || body), sweep: true, sweepRepo: null };
+}
+
 /**
  * @returns {{action: "ignore", hintSender?: string} |
  *   {action: "pass", reason: string, unknownBot?: string} |
- *   {action: "claim", parsed: object | null, unknownBot?: string}}
+ *   {action: "claim", parsed: object | null, sweep: boolean, sweepRepo: string | null, unknownBot?: string}}
  *   ignore: not ours, return undefined. hintSender is set when a sender that
  *     is neither listed nor a B id posted something that parses as a GitHub
  *     notification, so the operator can tell whether it is the app.
  *   pass: let the normal agent turn run (the post contains @openclaw).
- *   claim: return { handled: true }; queue parsed when it is not null.
+ *   claim: return { handled: true }. Queue parsed when it is not null, and a
+ *     sweep (full pass) when sweep is true.
  *     unknownBot is set for a B sender that is not in botSenderIds: claimed
  *     so it cannot start a paid agent turn, but never queued.
  */
@@ -94,14 +131,14 @@ export function decide(event, ctx, cfg) {
   const text = messageText(event);
   if (isGithubSender(event, ctx, cfg.botSenderIds)) {
     if (mentionsOpenclaw(text)) return { action: "pass", reason: "mention" };
-    return { action: "claim", parsed: parseGithubPost(text) };
+    return { action: "claim", ...analyzePost(event) };
   }
   if (isSlackBotId(sender)) {
     if (mentionsOpenclaw(text)) return { action: "pass", reason: "mention", unknownBot: sender };
-    return { action: "claim", parsed: null, unknownBot: sender };
+    return { action: "claim", parsed: null, sweep: false, sweepRepo: null, unknownBot: sender };
   }
   // Possibly a person (Kenny), or an app whose posts carry a U id.
-  if (sender && parseGithubPost(text)) return { action: "ignore", hintSender: sender };
+  if (sender && analyzePost(event).parsed) return { action: "ignore", hintSender: sender };
   return { action: "ignore" };
 }
 
