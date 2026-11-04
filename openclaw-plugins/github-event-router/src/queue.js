@@ -46,12 +46,26 @@ export function buildRecord(parsed, { messageId, channelId, now = new Date() }) 
   };
 }
 
+// The consumers (iwb, prbot) only drain a non-default queue dir whose parent
+// holds this file. It lives in the queue root, never inside a queue dir,
+// because launchd QueueDirectories fires while a watched dir is non-empty.
+export const QUEUE_MARKER = ".github-events-queue";
+
+export async function ensureMarker(root, fsImpl = fs) {
+  try {
+    await fsImpl.writeFile(path.join(root, QUEUE_MARKER), "github-event-router queue root\n", { flag: "wx", mode: 0o600 });
+  } catch (err) {
+    if (err?.code !== "EEXIST") throw err;
+  }
+}
+
 // fsImpl lets tests inject failures; it defaults to node:fs/promises.
 export async function writeEvent(root, record, { fsImpl = fs } = {}) {
   const queueDir = path.join(root, queueFor(record.kind));
   const tmpDir = path.join(root, ".tmp");
   await fsImpl.mkdir(queueDir, { recursive: true, mode: 0o700 });
   await fsImpl.mkdir(tmpDir, { recursive: true, mode: 0o700 });
+  await ensureMarker(root, fsImpl);
   const name = queueFileName(record);
   const tmp = path.join(tmpDir, `${name}.${process.pid}.tmp`);
   const dest = path.join(queueDir, name);

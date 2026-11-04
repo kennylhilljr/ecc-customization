@@ -220,6 +220,14 @@ test("writeEvent creates the queue dirs and never leaves partial files in the qu
     assert.deepEqual(JSON.parse(await fs.readFile(dest, "utf8")), rec);
     const mode = (await fs.stat(dest)).mode & 0o777;
     assert.equal(mode, 0o600);
+    // The consumers' safety marker is in the root, beside the queues, and a
+    // second write leaves it alone. Nothing but events lands in a queue dir.
+    const marker = path.join(root, ".github-events-queue");
+    assert.ok((await fs.lstat(marker)).isFile());
+    await writeEvent(root, rec);
+    assert.ok((await fs.lstat(marker)).isFile());
+    assert.deepEqual((await fs.readdir(path.join(root, "prbot"))).filter((n) => !n.endsWith(".json")), []);
+    assert.deepEqual((await fs.readdir(root)).sort(), [".github-events-queue", ".tmp", "prbot"]);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

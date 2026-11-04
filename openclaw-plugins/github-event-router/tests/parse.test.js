@@ -31,6 +31,45 @@ test("prefers the structured fallback over links in the body (Codex counterexamp
   assert.deepEqual(parseGithubPost(text), { repo: "acme/main", kind: "pull_request", number: 17, event: "comment" });
 });
 
+test("kind comes from the structured prefix, not title words (Codex round 3)", () => {
+  assert.deepEqual(parseGithubPost("[acme/r] Issue opened: #12 Review commit handling"), {
+    repo: "acme/r",
+    kind: "issue",
+    number: 12,
+    event: "opened",
+  });
+  assert.deepEqual(parseGithubPost("Issue reopened: acme/r#12 Merged PR review and pushed commits"), {
+    repo: "acme/r",
+    kind: "issue",
+    number: 12,
+    event: "reopened",
+  });
+  assert.deepEqual(parseGithubPost("[acme/r] Pull request opened by kenny: #13 Fix issue tracker"), {
+    repo: "acme/r",
+    kind: "pull_request",
+    number: 13,
+    event: "opened",
+  });
+  // The event also ignores the title.
+  assert.equal(parseGithubPost("[acme/r] Issue commented: #14 Closed then reopened").event, "comment");
+});
+
+test("a header link beats bracket text in the body (Codex round 3)", () => {
+  const text = "*Comment on <https://github.com/acme/main/issues/1#issuecomment-5|#1 Bug>*\n[acme/other] issue #2";
+  assert.deepEqual(parseGithubPost(text), { repo: "acme/main", kind: "issue", number: 1, event: "comment" });
+});
+
+test("bracket fallback must be a whole line in the documented format", () => {
+  for (const text of [
+    "Issue commented\nas noted in [acme/other] issue #2 earlier",
+    "Issue commented\n[acme/other] issue #2",
+    "Issue commented\n[acme/other] see #2",
+    "Issue commented\n> [acme/other] Issue opened: #2 quoted",
+  ]) {
+    assert.equal(parseGithubPost(text), null, text);
+  }
+});
+
 test("ignores links that are only in the body", () => {
   assert.equal(parseGithubPost("Issue opened by kenny\nSee https://github.com/acme/other/issues/2 for context"), null);
   assert.equal(parseGithubPost("Pull request opened by kenny\nFixes <https://github.com/acme/other/issues/2|acme/other#2>"), null);

@@ -26,6 +26,8 @@ Each file is written to `<queueRoot>/.tmp/` and renamed into the queue directory
 
 `event` is one of `opened`, `reopened`, `closed`, `merged`, `ready_for_review`, `review_requested`, `review`, `review_comment`, `comment`, `synchronize`, `labeled`, `assigned`, `edited` or `unknown`. It is read from the post's header line and link fragment, so treat it as a hint: the consumers (`iwb tick --from-queue`, `prbot watch --from-queue`) fetch the current issue or pull request from GitHub before acting.
 
+Each write also creates `<queueRoot>/.github-events-queue` if it is missing. The consumers drain a queue directory only when it is their default path or when its parent holds this marker, so a mistyped `--from-queue` path cannot move unrelated files. The marker sits in the root, not inside a queue directory, because launchd keeps a `QueueDirectories` job running while the watched directory has any entry.
+
 The consumers keep two more directories next to each queue, both outside the directory that launchd watches:
 
 | Directory | Written by | Contents |
@@ -39,12 +41,12 @@ OpenClaw's Slack plugin flattens a bot message before the hook sees it. When `me
 
 Only the notification itself names the target, so the parser looks in this order and stops at the first hit:
 
-1. the structured fallback `[OWNER/REPO] Pull request opened: #N Title`, on any line;
-2. a `https://github.com/OWNER/REPO/issues/N`, `/pull/N` or `/pulls/N` link in the header (the first non-empty line), bare or in Slack's `<url|label>` form, with any tail such as `/files`, `#issuecomment-…`, `#pullrequestreview-…` or `?w=1`;
+1. a `https://github.com/OWNER/REPO/issues/N`, `/pull/N` or `/pulls/N` link in the header (the first non-empty line), bare or in Slack's `<url|label>` form, with any tail such as `/files`, `#issuecomment-…`, `#pullrequestreview-…` or `?w=1`;
+2. a line that is exactly the structured fallback `[OWNER/REPO] Issue <action>: #N Title` or `[OWNER/REPO] Pull request <action>: #N Title`;
 3. a title line: a Slack link to an issue or pull request whose label starts with that number, such as `<https://github.com/o/r/pull/17|#17 Add queue>`;
-4. `OWNER/REPO#N` in the header, but only when the header says issue or pull request. A bare reference could be either, so it is skipped.
+4. `Issue … OWNER/REPO#N` or `Pull request … OWNER/REPO#N` in the header. A bare reference could be either, so it is skipped.
 
-Links anywhere else, such as `See https://github.com/acme/other/issues/2` in an issue body, are ignored. A post with no target in those places is left unparsed (rule 3 above).
+The kind comes from the link path or from the `Issue` / `Pull request` words in front of the number, never from the title: `[acme/r] Issue opened: #12 Review commit handling` is an issue. The event is also read only from text in front of the number. Links and bracket text anywhere else, such as `See https://github.com/acme/other/issues/2` or `[acme/other] issue #2` in a comment body, are ignored. A post with no target in those places is left unparsed (rule 3 above).
 
 ## Configuration
 
@@ -79,7 +81,8 @@ openclaw plugins inspect github-event-router --runtime --json
 `before_dispatch` is not a conversation hook, so `hooks.allowConversationAccess` is not needed. Then create the queue directories and change the channel:
 
 ```sh
-mkdir -p ~/.local/state/github-events/iwb ~/.local/state/github-events/prbot ~/.local/state/github-events/.tmp
+mkdir -p ~/.local/state/github-events/iwb ~/.local/state/github-events/iwb-code ~/.local/state/github-events/prbot ~/.local/state/github-events/.tmp
+touch ~/.local/state/github-events/.github-events-queue
 openclaw config set channels.slack.channels.C0CEMPH1L0N.requireMention false --strict-json
 ```
 
@@ -106,7 +109,7 @@ openclaw plugins disable github-event-router
 openclaw plugins uninstall github-event-router
 ```
 
-Disabling alone stops the hook. Queue files left behind are harmless. If the queue jobs are also removed, delete `~/.local/state/github-events`, which holds the queues, the `-deferred` and `-rejected` directories, `.tmp` and `unparsed.jsonl`.
+Disabling alone stops the hook. Queue files left behind are harmless. If the queue jobs are also removed, delete `~/.local/state/github-events`, which holds the queues, the `-deferred` and `-rejected` directories, `.tmp`, `.github-events-queue` and `unparsed.jsonl`.
 
 ## Tests
 
