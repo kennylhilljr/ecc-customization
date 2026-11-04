@@ -1,10 +1,12 @@
 // OpenClaw plugin entry: github-event-router.
 //
-// Registers one before_dispatch handler. For a bot-authored post in the
-// GitHub feed channel it writes a queue file (issues to <queueRoot>/iwb,
-// pull requests to <queueRoot>/prbot) and returns { handled: true } so no
-// model turn runs. A post that contains @openclaw is left to the normal ops
-// agent turn. Every other message is untouched.
+// Registers one before_dispatch handler. For a post in the GitHub feed
+// channel from a sender listed in botSenderIds it writes a queue file
+// (issues to <queueRoot>/iwb, pull requests to <queueRoot>/prbot) and returns
+// { handled: true } so no model turn runs. A post from any other Slack bot
+// (B id) is claimed but never queued, with a rate-limited "unknown bot
+// sender" log line. A post that contains @openclaw is left to the normal ops
+// agent turn. Messages from people are untouched.
 //
 // No runtime dependencies and no SDK import: the default export is the plain
 // object definePluginEntry() returns, as in the ecc-orchestrator plugin.
@@ -14,7 +16,25 @@ import { ConfigError, decide, messageText, parseConfig } from "./src/router.js";
 
 export const PLUGIN_ID = "github-event-router";
 
-export function createHandler(cfg, logger, { write = writeEvent, unparsed = recordUnparsed, now = () => new Date() } = {}) {
+export const SENDER_LOG_INTERVAL_MS = 10 * 60 * 1000;
+const SENDER_LOG_MAX_IDS = 64;
+
+/** One log line per sender id per interval, tracking at most 64 ids. */
+export function createSenderLog(logger, { intervalMs = SENDER_LOG_INTERVAL_MS, clock = () => Date.now() } = {}) {
+  const last = new Map();
+  return (key, line) => {
+    const t = clock();
+    const prev = last.get(key);
+    if (prev !== undefined && t - prev < intervalMs) return false;
+    if (prev === undefined && last.size >= SENDER_LOG_MAX_IDS) return false;
+    last.set(key, t);
+    logger?.info?.(line);
+    return true;
+  };
+}
+
+export function createHandler(cfg, logger, { write = writeEvent, unparsed = recordUnparsed, now = () => new Date(), senderLog } = {}) {
+  const logSender = senderLog ?? createSenderLog(logger);
   return async function beforeDispatch(event, ctx) {
     let decision;
     try {
@@ -23,7 +43,17 @@ export function createHandler(cfg, logger, { write = writeEvent, unparsed = reco
       logger?.warn?.(`${PLUGIN_ID}: decision failed, leaving message to the agent: ${err?.message ?? err}`);
       return undefined;
     }
+    if (decision.unknownBot) {
+      logSender(decision.unknownBot, `${PLUGIN_ID}: unknown bot sender ${decision.unknownBot}`);
+    }
+    if (decision.hintSender) {
+      logSender(
+        decision.hintSender,
+        `${PLUGIN_ID}: sender ${decision.hintSender} posted a GitHub notification but is not in botSenderIds; not queued`,
+      );
+    }
     if (decision.action !== "claim") return undefined;
+    if (decision.unknownBot) return { handled: true };
 
     const messageId = event?.messageId ?? ctx?.messageId;
     if (decision.parsed) {

@@ -26,7 +26,24 @@ test("handles the URL forms the app and users produce", () => {
   }
 });
 
-test("takes the first issue or pull request link in the post", () => {
+test("prefers the structured fallback over links in the body (Codex counterexample)", () => {
+  const text = "Issue commented\nSee https://github.com/acme/other/issues/2\n[acme/main] Pull request commented: #17";
+  assert.deepEqual(parseGithubPost(text), { repo: "acme/main", kind: "pull_request", number: 17, event: "comment" });
+});
+
+test("ignores links that are only in the body", () => {
+  assert.equal(parseGithubPost("Issue opened by kenny\nSee https://github.com/acme/other/issues/2 for context"), null);
+  assert.equal(parseGithubPost("Pull request opened by kenny\nFixes <https://github.com/acme/other/issues/2|acme/other#2>"), null);
+  // A title link must carry its own number as the label.
+  assert.equal(parseGithubPost("Comment by kenny\n<https://github.com/acme/other/issues/2|#3 Wrong>"), null);
+});
+
+test("header link wins over a title link further down", () => {
+  const text = "*Comment on <https://github.com/o/r/pull/8#issuecomment-1|#8 Fix>*\n<https://github.com/o/r/issues/2|#2 Other>";
+  assert.deepEqual(parseGithubPost(text), { repo: "o/r", kind: "pull_request", number: 8, event: "comment" });
+});
+
+test("takes the header link, not a later body link", () => {
   const got = parseGithubPost(
     "Pull request opened <https://github.com/o/r/pull/8|#8 Fix>\nFixes https://github.com/o/r/issues/2",
   );

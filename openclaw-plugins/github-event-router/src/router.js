@@ -49,14 +49,21 @@ export function isFeedChannel(event, ctx, channelId) {
   );
 }
 
-export function isBotSender(event, ctx, botSenderIds) {
+export function senderOf(event, ctx) {
   const sender = event?.senderId ?? ctx?.senderId;
-  if (typeof sender !== "string" || !sender) return false;
-  if (botSenderIds.length > 0) return botSenderIds.includes(sender);
-  // OpenClaw's Slack plugin uses message.user, falling back to bot_id. A
-  // B-prefixed id is therefore always a bot. An app that also sets
-  // message.user shows up as a U id: list it in botSenderIds.
-  return /^B[A-Z0-9]{6,}$/.test(sender);
+  return typeof sender === "string" && sender ? sender : null;
+}
+
+/** Only an explicitly listed sender is the GitHub app. There is no default. */
+export function isGithubSender(event, ctx, botSenderIds) {
+  const sender = senderOf(event, ctx);
+  return sender !== null && botSenderIds.includes(sender);
+}
+
+// OpenClaw's Slack plugin passes message.user as the sender, falling back to
+// bot_id, so a B-prefixed sender is always some bot.
+export function isSlackBotId(sender) {
+  return typeof sender === "string" && /^B[A-Z0-9]{6,}$/.test(sender);
 }
 
 export function mentionsOpenclaw(text) {
@@ -70,18 +77,32 @@ export function messageText(event) {
 }
 
 /**
- * @returns {{action: "ignore"} | {action: "pass", reason: string} |
- *   {action: "claim", parsed: object | null}}
- *   ignore: not ours, return undefined.
- *   pass: ours, but let the normal agent turn run.
+ * @returns {{action: "ignore", hintSender?: string} |
+ *   {action: "pass", reason: string, unknownBot?: string} |
+ *   {action: "claim", parsed: object | null, unknownBot?: string}}
+ *   ignore: not ours, return undefined. hintSender is set when a sender that
+ *     is neither listed nor a B id posted something that parses as a GitHub
+ *     notification, so the operator can tell whether it is the app.
+ *   pass: let the normal agent turn run (the post contains @openclaw).
  *   claim: return { handled: true }; queue parsed when it is not null.
+ *     unknownBot is set for a B sender that is not in botSenderIds: claimed
+ *     so it cannot start a paid agent turn, but never queued.
  */
 export function decide(event, ctx, cfg) {
   if (!isFeedChannel(event, ctx, cfg.channelId)) return { action: "ignore" };
-  if (!isBotSender(event, ctx, cfg.botSenderIds)) return { action: "ignore" };
+  const sender = senderOf(event, ctx);
   const text = messageText(event);
-  if (mentionsOpenclaw(text)) return { action: "pass", reason: "mention" };
-  return { action: "claim", parsed: parseGithubPost(text) };
+  if (isGithubSender(event, ctx, cfg.botSenderIds)) {
+    if (mentionsOpenclaw(text)) return { action: "pass", reason: "mention" };
+    return { action: "claim", parsed: parseGithubPost(text) };
+  }
+  if (isSlackBotId(sender)) {
+    if (mentionsOpenclaw(text)) return { action: "pass", reason: "mention", unknownBot: sender };
+    return { action: "claim", parsed: null, unknownBot: sender };
+  }
+  // Possibly a person (Kenny), or an app whose posts carry a U id.
+  if (sender && parseGithubPost(text)) return { action: "ignore", hintSender: sender };
+  return { action: "ignore" };
 }
 
 export function queueFor(kind) {

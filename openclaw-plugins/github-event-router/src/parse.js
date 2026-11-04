@@ -99,7 +99,51 @@ function earliest(text, re) {
   return null;
 }
 
+// A title line is a Slack link to an issue or pull request whose label starts
+// with that number, e.g. "<https://github.com/o/r/pull/17|#17 Add queue>",
+// optionally wrapped in * or _. Links inside body text do not qualify.
+function isTitleLine(line, match) {
+  const trimmed = line.trim().replace(/^[*_]+/, "");
+  if (!trimmed.startsWith("<")) return false;
+  const label = /^<[^|>]+\|#(\d+)\b/.exec(trimmed);
+  return Boolean(label) && label[1] === match[4];
+}
+
+function kindFromWords(lines) {
+  // Drop links and every owner/repo token so a repo named "pr-review-bots"
+  // does not read as "PR" or "review".
+  for (const line of lines) {
+    const words = stripLinkLabels(line).replace(new RegExp(`${OWNER}/${REPO}`, "g"), " ");
+    if (PR_WORDS.test(words)) return "pull_request";
+    if (ISSUE_WORDS.test(words)) return "issue";
+  }
+  return null;
+}
+
+function fromUrl(match, header, line) {
+  const number = Number(match[4]);
+  if (!Number.isSafeInteger(number) || number <= 0) return null;
+  const kind = match[3].toLowerCase() === "issues" ? "issue" : "pull_request";
+  const event = eventFromFragment(match[5]) ?? classifyEvent([header, line]);
+  return { repo: `${match[1]}/${match[2]}`, kind, number, event };
+}
+
+function fromRef(match, header, line) {
+  const number = Number(match[3]);
+  if (!Number.isSafeInteger(number) || number <= 0) return null;
+  // The reference's own line decides first, then the header. A bare
+  // owner/repo#N could be either kind; leave it to the backstop.
+  const kind = kindFromWords([line, header]);
+  if (!kind) return null;
+  return { repo: `${match[1]}/${match[2]}`, kind, number, event: classifyEvent([header, line]) };
+}
+
 /**
+ * Only the notification itself names the target: the structured
+ * "[owner/repo] ... #N" fallback, the header (first non-empty line), or a
+ * title link. Links further down are usually the issue or comment body
+ * ("See https://github.com/acme/other/issues/2") and are ignored.
+ *
  * @param {string} text combined event.content and event.body
  * @returns {{repo: string, kind: "issue"|"pull_request", number: number, event: string} | null}
  */
@@ -108,26 +152,23 @@ export function parseGithubPost(text) {
   const body = unescapeSlack(text);
   const header = firstLine(body);
 
-  const url = earliest(body, URL_RE);
-  if (url) {
-    const number = Number(url[4]);
-    if (!Number.isSafeInteger(number) || number <= 0) return null;
-    const kind = url[3].toLowerCase() === "issues" ? "issue" : "pull_request";
-    const event = eventFromFragment(url[5]) ?? classifyEvent([header, lineAt(body, url.index)]);
-    return { repo: `${url[1]}/${url[2]}`, kind, number, event };
+  // 1. Structured fallback, wherever OpenClaw placed it.
+  const bracket = earliest(body, BRACKET_REF_RE);
+  if (bracket) return fromRef(bracket, header, lineAt(body, bracket.index));
+
+  // 2. A link in the header line.
+  const headerUrl = earliest(header, URL_RE);
+  if (headerUrl) return fromUrl(headerUrl, header, header);
+
+  // 3. A title link on its own line.
+  for (const line of body.split("\n")) {
+    const m = earliest(line, URL_RE);
+    if (m && isTitleLine(line, m)) return fromUrl(m, header, line);
   }
 
-  const ref = earliest(body, BRACKET_REF_RE) ?? earliest(body, SHORT_REF_RE);
-  if (!ref) return null;
-  const number = Number(ref[3]);
-  if (!Number.isSafeInteger(number) || number <= 0) return null;
-  const context = `${header}\n${lineAt(body, ref.index)}`;
-  // Drop links and every owner/repo token so a repo named "pr-review-bots"
-  // does not read as "PR" or "review".
-  const contextNoLinks = stripLinkLabels(context).replace(new RegExp(`${OWNER}/${REPO}`, "g"), " ");
-  let kind;
-  if (PR_WORDS.test(contextNoLinks)) kind = "pull_request";
-  else if (ISSUE_WORDS.test(contextNoLinks)) kind = "issue";
-  else return null; // a bare owner/repo#N could be either; let the backstop find it
-  return { repo: `${ref[1]}/${ref[2]}`, kind, number, event: classifyEvent([header, lineAt(body, ref.index)]) };
+  // 4. owner/repo#N in the header.
+  const short = earliest(header, SHORT_REF_RE);
+  if (short) return fromRef(short, header, header);
+
+  return null;
 }

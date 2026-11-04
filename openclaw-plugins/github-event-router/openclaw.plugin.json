@@ -28,7 +28,7 @@
           "pattern": "^[BUW][A-Z0-9]{6,}$"
         },
         "maxItems": 16,
-        "description": "Slack sender ids that count as the GitHub app. When empty, any sender id that starts with B (a Slack bot_id) counts."
+        "description": "Slack sender ids of the GitHub app. Only these are queued. Empty (the default) queues nothing; other bot posts are claimed without queueing and logged as 'unknown bot sender <id>'."
       }
     }
   }

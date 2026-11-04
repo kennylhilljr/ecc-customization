@@ -46,25 +46,28 @@ export function buildRecord(parsed, { messageId, channelId, now = new Date() }) 
   };
 }
 
-export async function writeEvent(root, record) {
+// fsImpl lets tests inject failures; it defaults to node:fs/promises.
+export async function writeEvent(root, record, { fsImpl = fs } = {}) {
   const queueDir = path.join(root, queueFor(record.kind));
   const tmpDir = path.join(root, ".tmp");
-  await fs.mkdir(queueDir, { recursive: true, mode: 0o700 });
-  await fs.mkdir(tmpDir, { recursive: true, mode: 0o700 });
+  await fsImpl.mkdir(queueDir, { recursive: true, mode: 0o700 });
+  await fsImpl.mkdir(tmpDir, { recursive: true, mode: 0o700 });
   const name = queueFileName(record);
   const tmp = path.join(tmpDir, `${name}.${process.pid}.tmp`);
   const dest = path.join(queueDir, name);
-  const handle = await fs.open(tmp, "wx", 0o600);
+  let handle;
   try {
+    handle = await fsImpl.open(tmp, "wx", 0o600);
     await handle.writeFile(`${JSON.stringify(record)}\n`);
     await handle.sync();
-  } finally {
-    await handle.close();
-  }
-  try {
-    await fs.rename(tmp, dest);
+    const open = handle;
+    handle = undefined;
+    await open.close();
+    await fsImpl.rename(tmp, dest);
   } catch (err) {
-    await fs.rm(tmp, { force: true });
+    // Whatever failed (open, write, sync, close or rename), leave no temp file.
+    if (handle) await handle.close().catch(() => {});
+    await fs.rm(tmp, { force: true }).catch(() => {});
     throw err;
   }
   return dest;

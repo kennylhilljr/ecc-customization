@@ -4,13 +4,13 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 
-import plugin, { createHandler } from "../index.js";
+import plugin, { createHandler, createSenderLog } from "../index.js";
 import { buildRecord, queueFileName, writeEvent } from "../src/queue.js";
-import { ConfigError, decide, isBotSender, isFeedChannel, mentionsOpenclaw, parseConfig } from "../src/router.js";
+import { ConfigError, decide, isFeedChannel, isGithubSender, mentionsOpenclaw, parseConfig } from "../src/router.js";
 import { SAMPLES, flattenLikeOpenClaw } from "./fixtures/github-slack-posts.js";
 
 const CHANNEL = "C0CEMPH1L0N";
-const cfg = parseConfig({ queueRoot: "/q" });
+const cfg = parseConfig({ queueRoot: "/q", botSenderIds: ["B07GITHUBAPP"] });
 
 // What before_dispatch receives for a Slack post in #github-feed: event.channel
 // is the surface ("slack"), senderId is message.user or else message.bot_id,
@@ -72,12 +72,13 @@ test("feed channel match accepts the conversation id forms OpenClaw uses", () =>
   assert.ok(!isFeedChannel({ channel: "discord" }, { conversationId: `channel:${CHANNEL}` }, CHANNEL));
 });
 
-test("bot sender: B ids by default, explicit list when configured", () => {
-  assert.ok(isBotSender({ senderId: "B07GITHUBAPP" }, {}, []));
-  assert.ok(!isBotSender({ senderId: "U0ADXF02M4K" }, {}, []));
-  assert.ok(!isBotSender({}, {}, []));
-  assert.ok(isBotSender({ senderId: "U0GITHUBAPP" }, {}, ["U0GITHUBAPP"]));
-  assert.ok(!isBotSender({ senderId: "B07OTHERBOT" }, {}, ["U0GITHUBAPP"]));
+test("GitHub sender: only an explicit botSenderIds entry counts, no default", () => {
+  assert.ok(!isGithubSender({ senderId: "B07GITHUBAPP" }, {}, []));
+  assert.ok(!isGithubSender({ senderId: "U0ADXF02M4K" }, {}, []));
+  assert.ok(!isGithubSender({}, {}, ["B07GITHUBAPP"]));
+  assert.ok(isGithubSender({ senderId: "B07GITHUBAPP" }, {}, ["B07GITHUBAPP"]));
+  assert.ok(isGithubSender({ senderId: "U0GITHUBAPP" }, {}, ["U0GITHUBAPP"]));
+  assert.ok(!isGithubSender({ senderId: "B07OTHERBOT" }, {}, ["B07GITHUBAPP"]));
 });
 
 test("@openclaw is matched case-insensitively and as a whole word", () => {
@@ -95,8 +96,27 @@ test("claim decision", () => {
   const unparsed = decide(...hookArgs(SAMPLES.subscribeAck), cfg);
   assert.deepEqual(unparsed, { action: "claim", parsed: null });
 
-  // Kenny typing in the channel: untouched.
-  assert.deepEqual(decide(...hookArgs({ ...SAMPLES.prOpened, bot_id: undefined }, { event: { senderId: "U0ADXF02M4K" } }), cfg), { action: "ignore" });
+  // Kenny typing in the channel: untouched. A pasted GitHub notification only
+  // yields a hint so an app with a U id can be identified.
+  assert.deepEqual(decide(...hookArgs({ text: "thanks" }, { event: { senderId: "U0ADXF02M4K" } }), cfg), { action: "ignore" });
+  assert.deepEqual(decide(...hookArgs(SAMPLES.prOpened, { event: { senderId: "U0ADXF02M4K" } }), cfg), {
+    action: "ignore",
+    hintSender: "U0ADXF02M4K",
+  });
+  // A bot that is not on the list (a CI bot posting a GitHub link): claimed
+  // so it cannot start an agent turn, never queued.
+  assert.deepEqual(decide(...hookArgs(SAMPLES.prOpened, { event: { senderId: "B07CIBOT01" } }), cfg), {
+    action: "claim",
+    parsed: null,
+    unknownBot: "B07CIBOT01",
+  });
+  assert.deepEqual(decide(...hookArgs(SAMPLES.mentionComment, { event: { senderId: "B07CIBOT01" } }), cfg), {
+    action: "pass",
+    reason: "mention",
+    unknownBot: "B07CIBOT01",
+  });
+  // Default config trusts nobody.
+  assert.equal(decide(...hookArgs(SAMPLES.prOpened), parseConfig({ queueRoot: "/q" })).unknownBot, "B07GITHUBAPP");
   // Same bot post in another channel: untouched.
   assert.deepEqual(
     decide(...hookArgs(SAMPLES.prOpened, { event: { sessionKey: "agent:ops:slack:channel:c0cerfq8ujv" }, ctx: { conversationId: "channel:C0CERFQ8UJV" } }), cfg),
@@ -203,6 +223,87 @@ test("writeEvent creates the queue dirs and never leaves partial files in the qu
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
+});
+
+// Wraps node:fs/promises and makes one step of the write fail.
+function failingFs(step) {
+  const boom = () => Promise.reject(new Error(`injected ${step} failure`));
+  return {
+    ...fs,
+    mkdir: fs.mkdir,
+    rename: step === "rename" ? boom : fs.rename,
+    open: async (...args) => {
+      if (step === "open") return boom();
+      const real = await fs.open(...args);
+      return {
+        writeFile: step === "write" ? boom : (...a) => real.writeFile(...a),
+        sync: step === "sync" ? boom : () => real.sync(),
+        close: step === "close" ? async () => {
+          await real.close();
+          return boom();
+        } : () => real.close(),
+      };
+    },
+  };
+}
+
+test("writeEvent removes its temp file when any step fails", async () => {
+  for (const step of ["open", "write", "sync", "close", "rename"]) {
+    const root = await tempRoot();
+    try {
+      const rec = buildRecord({ repo: "o/r", kind: "issue", number: 4, event: "opened" }, { messageId: "1.2", channelId: CHANNEL });
+      await assert.rejects(writeEvent(root, rec, { fsImpl: failingFs(step) }), new RegExp(`injected ${step}`));
+      assert.deepEqual(await fs.readdir(path.join(root, ".tmp")), [], step);
+      assert.deepEqual(await listQueue(root, "iwb"), [], step);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("posts from an unknown bot are claimed, not queued, and logged at most once per interval", async () => {
+  const root = await tempRoot();
+  try {
+    const lines = [];
+    let t = 0;
+    const logger = { info: (m) => lines.push(m), warn: (m) => lines.push(m) };
+    const handler = createHandler(parseConfig({ queueRoot: root }), logger, {
+      senderLog: createSenderLog(logger, { intervalMs: 1000, clock: () => t }),
+    });
+    for (let i = 0; i < 5; i++) {
+      assert.deepEqual(await handler(...hookArgs(SAMPLES.prOpened)), { handled: true });
+    }
+    t = 1500;
+    assert.deepEqual(await handler(...hookArgs(SAMPLES.issueComment)), { handled: true });
+    // @openclaw from an unknown bot still reaches the agent.
+    assert.equal(await handler(...hookArgs(SAMPLES.mentionComment)), undefined);
+    assert.deepEqual(lines, [
+      "github-event-router: unknown bot sender B07GITHUBAPP",
+      "github-event-router: unknown bot sender B07GITHUBAPP",
+    ]);
+    assert.deepEqual(await listQueue(root, "iwb"), []);
+    assert.deepEqual(await listQueue(root, "prbot"), []);
+    await assert.rejects(fs.stat(path.join(root, "unparsed.jsonl")));
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("sender log tracks a bounded number of ids", () => {
+  const lines = [];
+  const log = createSenderLog({ info: (m) => lines.push(m) }, { intervalMs: 1000, clock: () => 0 });
+  for (let i = 0; i < 200; i++) log(`B0BOT${String(i).padStart(4, "0")}`, `line ${i}`);
+  assert.equal(lines.length, 64);
+});
+
+test("a U sender posting a GitHub notification is not claimed but is hinted once", async () => {
+  const lines = [];
+  const handler = createHandler(cfg, { info: (m) => lines.push(m) });
+  const args = hookArgs(SAMPLES.prOpened, { event: { senderId: "U0GITHUBAPP" } });
+  assert.equal(await handler(...args), undefined);
+  assert.equal(await handler(...args), undefined);
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /sender U0GITHUBAPP posted a GitHub notification but is not in botSenderIds/);
 });
 
 test("register wires one before_dispatch handler, and none on bad config", () => {
