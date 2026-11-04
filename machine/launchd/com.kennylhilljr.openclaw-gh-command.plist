@@ -29,6 +29,8 @@
 		<string>/Library/Frameworks/Python.framework/Versions/3.13/bin:/opt/homebrew/bin:/Users/bkh223/.local/bin:/Users/bkh223/.nvm/versions/node/v24.16.0/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
 		<key>HOME</key>
 		<string>/Users/bkh223</string>
+		<key>SSL_CERT_FILE</key>
+		<string>/etc/ssl/cert.pem</string>
 	</dict>
 </dict>
 </plist>
