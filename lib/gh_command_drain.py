@@ -1,14 +1,31 @@
 #!/usr/bin/env python3
 """Verify queued "@openclaw" GitHub commands and wake the OpenClaw ops agent.
 
-    gh_command_drain.py [--queue DIR] [--dry-run]
+    gh_command_drain.py [--queue DIR] [--dry-run] [--retry-pending]
 
 The github-event-router plugin writes a `command` event file into
 ~/.local/state/github-events/ops/ when a GitHub Slack app post mentions
 @openclaw. The post text is written by whoever commented on GitHub, so it is
 never handed to an agent. This drain asks the GitHub API for recent comments
 instead and wakes the ops agent only with comments that kennylhilljr wrote and
-that mention @openclaw.
+that mention @openclaw. Three sources are read: issue and pull request
+conversation comments, inline pull request review comments, and pull request
+review bodies (the last only when the event names a pull request; GitHub has
+no repository-wide list of reviews).
+
+Before each `openclaw agent` run the drain records a pending entry for that
+comment in the state file. A run that dies before the result is recorded
+leaves the entry behind, and later runs do not wake the agent for that
+comment again, so nothing is posted twice. An agent run that times out or
+exits nonzero keeps its entry for the same reason, since it may have posted
+before failing; only a run that could not be started at all clears it.
+--retry-pending clears those entries so a later event can deliver the comment.
+Such a run also sends a short alert to Slack with `openclaw message send`;
+a failed alert is only logged.
+
+Before the first agent run of a drain run, `openclaw health` checks that the
+local Gateway answers. If it does not, no pending entry is written, the agent
+is not started, and the event is deferred.
 
 Exit codes: 0 when every event was handled (or there was nothing to do, or
 another run holds the lock), 1 when an event was deferred or given up on, 2
@@ -35,6 +52,10 @@ from pathlib import Path
 TRUSTED_LOGIN = "kennylhilljr"
 MENTION = "@openclaw"
 REPLY_CHANNEL = "C0CEMPH1L0N"
+ALERT_CHANNEL = "C0CERFQ8UJV"    # where a run with an unknown outcome is reported
+HEALTH_TIMEOUT_MS = 5000         # passed to `openclaw health --timeout`
+HEALTH_KILL_AFTER = 15
+ALERT_TIMEOUT = 60
 AGENT_TIMEOUT = 600          # passed to `openclaw agent --timeout`
 AGENT_KILL_AFTER = 660       # subprocess timeout, a bit above the agent's own
 TOKEN_TIMEOUT = 60
@@ -44,15 +65,23 @@ MAX_ATTEMPTS = 24            # deferrals before an event file is given up on and
 QUEUE_SETTLE = 30            # seconds an unparsable file is left alone in case it is still being written
 CLOCK_SKEW = 300             # an mtime up to this far in the future still counts as just written
 REQUEUE_AFTER = 3600         # deferred files older than this go back into the queue
-MAX_PAGES = 10
-DELIVERED_KEEP = 1000        # delivered comment ids remembered per repository
+MAX_PAGES = 10               # more pages than this is an error, never a silent cut
+DELIVERED_KEEP = 1000        # delivered comment keys remembered per repository
 QUEUE_MARKER = ".github-events-queue"
 REPO_NAME = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 ISSUE_URL_NUMBER = re.compile(r"/issues/(\d+)$")
+PULL_URL_NUMBER = re.compile(r"/pulls/(\d+)$")
+TARGET_KINDS = (None, "issue", "pull_request")
+# the three comment sources have separate id spaces, so state keys are "<source>:<id>"
+ISSUE_COMMENT, REVIEW_COMMENT, REVIEW = "issue_comment", "review_comment", "review"
 
 
 class GitHubError(Exception):
     """A token, HTTP or network failure. The message never holds the token."""
+
+    def __init__(self, msg, status=None):
+        super().__init__(msg)
+        self.status = status
 
 
 def log(msg):
@@ -193,6 +222,8 @@ def parse_event(path):
         return None
     if n is not None and repo is None:
         return None
+    if ev.get("target_kind") not in TARGET_KINDS:
+        return None
     if parse_time(ev.get("received_at")) is None:
         return None
     return ev
@@ -200,16 +231,24 @@ def parse_event(path):
 
 # ---------------------------------------------------------------- state
 
+def empty_state():
+    return {"repos": {}, "delivered": {}, "pending": {}}
+
+
 def load_state(path, dry_run):
+    """The state: "repos" maps a lower-case repository to its highest delivered issue comment id,
+    "delivered" to the "<source>:<id>" keys delivered there (oldest first), and "pending" to the keys
+    whose agent run started but was never recorded as finished, each with its start time and URL.
+    Plain integer ids from the first state format are read as issue comment ids."""
     try:
         raw = path.read_text()
     except FileNotFoundError:
-        return {"repos": {}, "delivered": {}}
+        return empty_state()
     try:
         data = json.loads(raw)
-        if not isinstance(data, dict) or not isinstance(data.get("repos", {}), dict) \
-                or not isinstance(data.get("delivered", {}), dict):
-            raise ValueError("not an object with a repos object")
+        if not isinstance(data, dict) or not all(isinstance(data.get(k, {}), dict)
+                                                 for k in ("repos", "delivered", "pending")):
+            raise ValueError("not an object with repos, delivered and pending objects")
     except ValueError as e:
         stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
         dest = path.with_name(f"{path.name}.corrupt-{stamp}")
@@ -218,33 +257,60 @@ def load_state(path, dry_run):
         else:
             os.replace(path, dest)
             log(f"state: {path} is malformed ({e}); moved it to {dest.name} and started empty")
-        return {"repos": {}, "delivered": {}}
-    repos = {k: v for k, v in data.get("repos", {}).items()
-             if isinstance(k, str) and isinstance(v, int) and not isinstance(v, bool)}
-    delivered = {}
-    for k, v in data.get("delivered", {}).items():
-        if isinstance(k, str) and isinstance(v, list):
-            delivered[k] = [i for i in v if isinstance(i, int) and not isinstance(i, bool)]
-    return {"repos": repos, "delivered": delivered}
+        return empty_state()
+    state = empty_state()
+    state["repos"] = {k: v for k, v in data.get("repos", {}).items()
+                      if isinstance(k, str) and isinstance(v, int) and not isinstance(v, bool)}
+    for repo, keys in data.get("delivered", {}).items():
+        if not isinstance(repo, str) or not isinstance(keys, list):
+            continue
+        out = []
+        for k in keys:
+            if isinstance(k, int) and not isinstance(k, bool):
+                k = f"{ISSUE_COMMENT}:{k}"
+            if isinstance(k, str) and k not in out:
+                out.append(k)
+        state["delivered"][repo] = out
+    for repo, entries in data.get("pending", {}).items():
+        if isinstance(repo, str) and isinstance(entries, dict):
+            state["pending"][repo] = {k: v for k, v in entries.items() if isinstance(k, str) and isinstance(v, dict)}
+    return state
 
 
-def already_handled(state, key, cid):
-    """True when comment cid was delivered before. Ids are remembered per repository, so a comment held
-    back by a deferred event is still delivered after a later event moved last_id past it. Ids older than
-    the oldest remembered one fall back to the last_id watermark."""
-    done = state["delivered"].get(key, [])
-    if cid in done:
+def already_handled(state, repo, source, cid):
+    """True when this comment was delivered before. Keys are remembered per repository, so a comment held
+    back by a deferred event is still delivered after a later event moved past it. Issue comment ids older
+    than the oldest one remembered also fall back to the "repos" watermark."""
+    done = state["delivered"].get(repo, [])
+    if f"{source}:{cid}" in done:
         return True
-    last = state["repos"].get(key, 0)
-    floor = min(done) if done else None
-    return cid <= last and (floor is None or cid < floor)
+    if source != ISSUE_COMMENT:
+        return False
+    last = state["repos"].get(repo, 0)
+    ids = [int(k.split(":", 1)[1]) for k in done
+           if k.startswith(ISSUE_COMMENT + ":") and k.split(":", 1)[1].isdigit()]
+    return cid <= last and (not ids or cid < min(ids))
 
 
-def mark_delivered(state, key, cid):
-    done = state["delivered"].setdefault(key, [])
-    done.append(cid)
-    state["delivered"][key] = sorted(set(done))[-DELIVERED_KEEP:]
-    state["repos"][key] = max(state["repos"].get(key, 0), cid)
+def mark_pending(state, repo, key, url):
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    state["pending"].setdefault(repo, {})[key] = {"since": stamp, "url": url}
+
+
+def clear_pending(state, repo, key):
+    entries = state["pending"].get(repo, {})
+    entries.pop(key, None)
+    if not entries:
+        state["pending"].pop(repo, None)
+
+
+def mark_delivered(state, repo, source, cid):
+    key = f"{source}:{cid}"
+    clear_pending(state, repo, key)
+    done = [k for k in state["delivered"].get(repo, []) if k != key] + [key]
+    state["delivered"][repo] = done[-DELIVERED_KEEP:]
+    if source == ISSUE_COMMENT:
+        state["repos"][repo] = max(state["repos"].get(repo, 0), cid)
 
 
 # ---------------------------------------------------------------- GitHub
@@ -292,10 +358,13 @@ class GitHub:
         return self._token
 
     def get_pages(self, path, params):
-        """Every page of a list endpoint, following Link rel="next" on the same API host only."""
+        """Every page of a list endpoint, following Link rel="next" on the same API host only. More than
+        MAX_PAGES pages raises GitHubError rather than returning a cut-off list."""
         url = f"{self.base}{path}?{urllib.parse.urlencode(params)}"
         pages = []
-        for _ in range(MAX_PAGES):
+        while True:
+            if len(pages) == MAX_PAGES:
+                raise GitHubError(f"GET {path} has more than {MAX_PAGES} pages")
             headers = {"Authorization": f"Bearer {self.token()}", "Accept": "application/vnd.github+json",
                        "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "openclaw-gh-command-drain"}
             status, hdrs, body = self.http_get(url, headers)
@@ -305,17 +374,16 @@ class GitHub:
                     msg = str(json.loads(body).get("message", ""))[:200]
                 except (ValueError, AttributeError):
                     pass
-                raise GitHubError(f"GET {path} failed: HTTP {status}{': ' + msg if msg else ''}")
+                raise GitHubError(f"GET {path} failed: HTTP {status}{': ' + msg if msg else ''}", status)
             try:
                 pages.append(json.loads(body))
             except ValueError:
                 raise GitHubError(f"GET {path} returned a body that is not JSON") from None
             url = next_link(hdrs.get("link"))
             if not url:
-                break
+                return pages
             if not url.startswith(self.base + "/"):
                 raise GitHubError(f"GET {path}: next page points outside {self.base}")
-        return pages
 
     def installation_repos(self):
         repos = []
@@ -327,12 +395,7 @@ class GitHub:
                       and REPO_NAME.match(r["full_name"])]
         return repos
 
-    def comments(self, repo, number, since):
-        if number is not None:
-            path, params = f"/repos/{repo}/issues/{number}/comments", {"per_page": 100, "since": since}
-        else:
-            path = f"/repos/{repo}/issues/comments"
-            params = {"sort": "created", "direction": "desc", "per_page": 100, "since": since}
+    def list(self, path, params):
         out = []
         for page in self.get_pages(path, params):
             if not isinstance(page, list):
@@ -340,30 +403,54 @@ class GitHub:
             out += [c for c in page if isinstance(c, dict)]
         return out
 
+    def comments(self, repo, number, target_kind, since):
+        """[(source, comment)] from every source that applies to the target. With a number and no
+        target_kind the pull request endpoints are tried too, and a 404 there means it is an issue."""
+        if number is None:
+            wide = {"sort": "created", "direction": "desc", "per_page": 100, "since": since}
+            return ([(ISSUE_COMMENT, c) for c in self.list(f"/repos/{repo}/issues/comments", wide)]
+                    + [(REVIEW_COMMENT, c) for c in self.list(f"/repos/{repo}/pulls/comments", wide)])
+        out = [(ISSUE_COMMENT, c) for c in self.list(f"/repos/{repo}/issues/{number}/comments",
+                                                     {"per_page": 100, "since": since})]
+        if target_kind == "issue":
+            return out
+        try:
+            out += [(REVIEW_COMMENT, c) for c in self.list(f"/repos/{repo}/pulls/{number}/comments",
+                                                           {"per_page": 100, "since": since})]
+            out += [(REVIEW, c) for c in self.list(f"/repos/{repo}/pulls/{number}/reviews", {"per_page": 100})]
+        except GitHubError as e:
+            if target_kind is None and e.status == 404:
+                return out
+            raise
+        return out
+
 
 def select(comments, repo, window_start, state):
     """Trusted @openclaw comments created in the window and not yet delivered, oldest first.
-    Each item is (comment id, repo, issue number, html_url, body)."""
+    comments holds (source, comment) pairs. Each item is (time, source, id, repo, number, html_url, body)."""
     picked = {}
-    for c in comments:
+    for source, c in comments:
         user, cid, body = c.get("user"), c.get("id"), c.get("body")
         if not isinstance(user, dict) or user.get("login") != TRUSTED_LOGIN or user.get("type") != "User":
             continue
-        if isinstance(cid, bool) or not isinstance(cid, int) or not isinstance(body, str):
+        if isinstance(cid, bool) or not isinstance(cid, int) or not isinstance(body, str) or not body.strip():
             continue
         if MENTION not in body.lower():
             continue
-        created = parse_time(c.get("created_at"))
+        created = parse_time(c.get("submitted_at" if source == REVIEW else "created_at"))
         if created is None or created < window_start:
             continue
-        m = ISSUE_URL_NUMBER.search(str(c.get("issue_url", "")))
+        if source == ISSUE_COMMENT:
+            m = ISSUE_URL_NUMBER.search(str(c.get("issue_url", "")))
+        else:
+            m = PULL_URL_NUMBER.search(str(c.get("pull_request_url", "")))
         url = c.get("html_url")
         if not m or not isinstance(url, str):
             continue
-        if already_handled(state, repo.lower(), cid):
+        if already_handled(state, repo.lower(), source, cid):
             continue
-        picked[cid] = (cid, repo, int(m.group(1)), url, body)
-    return [picked[k] for k in sorted(picked)]
+        picked[(source, cid)] = (created, source, cid, repo, int(m.group(1)), url, body)
+    return sorted(picked.values(), key=lambda item: item[:3])
 
 
 # ---------------------------------------------------------------- agent
@@ -373,32 +460,85 @@ def message_text(repo, number, url, body):
             f"Comment: {url}\nOn: {repo}#{number}\n\n{body}")
 
 
+AGENT_OK, AGENT_NOT_STARTED, AGENT_UNKNOWN = "ok", "not_started", "unknown"
+
+
 def wake_agent(text, run):
-    """Run `openclaw agent` with the message in a private file. True when it exits 0."""
-    tmpdir = tempfile.mkdtemp(prefix="openclaw-gh-command-")
+    """Run `openclaw agent` with the message in a private file. Returns (outcome, detail): AGENT_OK when
+    it exits 0, AGENT_NOT_STARTED when it could not be started at all (nothing can have been posted), and
+    AGENT_UNKNOWN when it timed out or exited nonzero (it may already have acted and posted). detail is
+    "timeout" or "exit N" for AGENT_UNKNOWN."""
+    try:
+        tmpdir = tempfile.mkdtemp(prefix="openclaw-gh-command-")
+    except OSError as e:
+        log(f"agent: could not create the message folder ({e.strerror or e})")
+        return AGENT_NOT_STARTED, "not started"
     try:
         path = os.path.join(tmpdir, "message.txt")
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w") as fh:
-            fh.write(text)
-        argv = [os.environ.get("OPENCLAW_BIN") or "openclaw", "agent", "--agent", "ops",
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w") as fh:
+                fh.write(text)
+        except OSError as e:
+            log(f"agent: could not write the message file ({e.strerror or e})")
+            return AGENT_NOT_STARTED, "not started"
+        argv = [openclaw_bin(), "agent", "--agent", "ops",
                 "--message-file", path, "--deliver", "--reply-channel", "slack",
                 "--reply-to", f"channel:{REPLY_CHANNEL}", "--timeout", str(AGENT_TIMEOUT)]
         try:
             r = run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=AGENT_KILL_AFTER)
         except subprocess.TimeoutExpired:
             log(f"agent: openclaw agent timed out after {AGENT_KILL_AFTER}s")
-            return False
+            return AGENT_UNKNOWN, "timeout"
         except OSError as e:
             log(f"agent: could not run openclaw ({e.strerror or e})")
-            return False
+            return AGENT_NOT_STARTED, "not started"
         if r.returncode != 0:
             tail = (r.stderr or "").strip()[-300:]
             log(f"agent: openclaw agent exited {r.returncode}{': ' + tail if tail else ''}")
-            return False
-        return True
+            return AGENT_UNKNOWN, f"exit {r.returncode}"
+        return AGENT_OK, ""
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def openclaw_bin():
+    return os.environ.get("OPENCLAW_BIN") or "openclaw"
+
+
+def gateway_reachable(run):
+    """True when `openclaw health` exits 0 in time. Output is discarded."""
+    try:
+        r = run([openclaw_bin(), "health", "--timeout", str(HEALTH_TIMEOUT_MS)], stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, timeout=HEALTH_KILL_AFTER)
+    except subprocess.TimeoutExpired:
+        log(f"gateway: openclaw health timed out after {HEALTH_KILL_AFTER}s; gateway not reachable")
+        return False
+    except OSError as e:
+        log(f"gateway: could not run openclaw health ({e.strerror or e}); gateway not reachable")
+        return False
+    if r.returncode != 0:
+        log(f"gateway: openclaw health exited {r.returncode}; gateway not reachable")
+        return False
+    return True
+
+
+def send_alert(url, detail, run):
+    """Tell the owner in Slack that a comment was left pending. A failure is only logged."""
+    text = (f"openclaw-gh-command-drain: the ops agent run for {url} did not finish cleanly ({detail}). "
+            f"It was not resent. If nothing was posted, run: openclaw-gh-command-drain --retry-pending")
+    argv = [openclaw_bin(), "message", "send", "--channel", "slack", "--target", f"channel:{ALERT_CHANNEL}",
+            "-m", text]
+    try:
+        r = run(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=ALERT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        log(f"alert: openclaw message send timed out after {ALERT_TIMEOUT}s")
+        return
+    except OSError as e:
+        log(f"alert: could not run openclaw message send ({e.strerror or e})")
+        return
+    if r.returncode != 0:
+        log(f"alert: openclaw message send exited {r.returncode}")
 
 
 # ---------------------------------------------------------------- the run
@@ -447,6 +587,7 @@ def drain(qdir, dry_run, gh, run, now):
 
     state_path = state_dir() / "state.json"
     state = None
+    gateway = None
     for path in files:
         try:
             ev = parse_event(path)
@@ -474,29 +615,78 @@ def drain(qdir, dry_run, gh, run, now):
             repos = [ev["repo"]] if ev["repo"] is not None else gh.installation_repos()
             picked = []
             for repo in repos:
-                picked += select(gh.comments(repo, ev["number"], since), repo, window_start, state)
+                picked += select(gh.comments(repo, ev["number"], ev.get("target_kind"), since),
+                                 repo, window_start, state)
         except GitHubError as e:
             log(f"github: {path.name}: {e}")
             defer(path, ev, "GitHub lookup failed")
             continue
-        picked.sort()
-        ok = True
-        for cid, repo, number, url, body in picked:
+        picked.sort(key=lambda item: item[:3])
+        ok, why = True, ""
+        for _, source, cid, repo, number, url, body in picked:
+            key, rkey = f"{source}:{cid}", repo.lower()
+            pending = state["pending"].get(rkey, {}).get(key)
+            if pending is not None:
+                log(f"agent: not waking the ops agent again for {url}: a run started at "
+                    f"{pending.get('since', '?')} was never recorded as finished; run with --retry-pending "
+                    f"to allow it again")
+                continue
             if dry_run:
                 log(f"agent: would wake the ops agent for {url}")
                 continue
-            log(f"agent: waking the ops agent for {url}")
-            if not wake_agent(message_text(repo, number, url, body), run):
-                ok = False
+            if gateway is None:  # probed once per run, before the first pending record
+                gateway = gateway_reachable(run)
+            if not gateway:
+                ok, why = False, "gateway not reachable"
                 break
-            mark_delivered(state, repo.lower(), cid)
-            write_json_atomic(state_path, state)
+            mark_pending(state, rkey, key, url)
+            try:
+                write_json_atomic(state_path, state)
+            except OSError as e:
+                clear_pending(state, rkey, key)
+                log(f"state: could not record the pending run for {url} ({e.strerror or e}); not waking the agent")
+                ok, why = False, "state write failed"
+                break
+            log(f"agent: waking the ops agent for {url}")
+            outcome, detail = wake_agent(message_text(repo, number, url, body), run)
+            if outcome == AGENT_NOT_STARTED:  # nothing ran, so a later run may safely try again
+                clear_pending(state, rkey, key)
+                try:
+                    write_json_atomic(state_path, state)
+                except OSError as e:
+                    log(f"state: could not clear the pending entry for {url} ({e.strerror or e}); "
+                        f"it stays pending until --retry-pending")
+                ok, why = False, "ops agent could not be started"
+                break
+            if outcome == AGENT_UNKNOWN:  # it may have posted already: keep the entry so it is not sent twice
+                log(f"agent: {url} stays pending, so it will not be sent again automatically; check Slack, "
+                    f"and if the ops agent did not answer, run with --retry-pending")
+                send_alert(url, detail, run)
+                ok, why = False, "ops agent run failed or timed out"
+                break
+            mark_delivered(state, rkey, source, cid)
+            try:
+                write_json_atomic(state_path, state)
+            except OSError as e:
+                log(f"state: {url} was delivered but could not be recorded ({e.strerror or e}); "
+                    f"it stays pending, so it is not sent again")
         if not ok:
-            defer(path, ev, "ops agent run failed")
+            defer(path, ev, why)
             continue
         found = f"{len(picked)} verified comment{'s' if len(picked) != 1 else ''}"
         act("delete", path, f"handled, {found}", lambda: os.unlink(path))
     return 1 if failed else 0
+
+
+def retry_pending(dry_run):
+    path = state_dir() / "state.json"
+    state = load_state(path, dry_run)
+    urls = [e.get("url", key) for entries in state["pending"].values() for key, e in entries.items()]
+    for url in urls:
+        log(f"state: {'would clear' if dry_run else 'clearing'} the pending entry for {url}")
+    if urls and not dry_run:
+        state["pending"] = {}
+        write_json_atomic(path, state)
 
 
 def main(argv=None, http_get=None, run=None):
@@ -504,6 +694,9 @@ def main(argv=None, http_get=None, run=None):
                                  description="Verify queued @openclaw GitHub commands and wake the ops agent.")
     ap.add_argument("--queue", default=None, help="queue directory (default ~/.local/state/github-events/ops)")
     ap.add_argument("--dry-run", action="store_true", help="read and log only: no agent runs, moves or state writes")
+    ap.add_argument("--retry-pending", action="store_true",
+                    help="clear pending entries left by runs that never finished, so those comments can be "
+                         "delivered by a later event")
     args = ap.parse_args(argv)
     run = run or subprocess.run
     held = lock(state_dir())
@@ -515,6 +708,8 @@ def main(argv=None, http_get=None, run=None):
         if qdir is None:
             print(f"openclaw-gh-command-drain: refusing the queue: {why}. Nothing was moved.", file=sys.stderr)
             return 2
+        if args.retry_pending:
+            retry_pending(args.dry_run)
         if not qdir.exists():
             return 0
         now = time.time()

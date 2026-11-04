@@ -1,5 +1,5 @@
 #!/bin/sh
-# openclaw-gh-command-drain [--queue DIR] [--dry-run]
+# openclaw-gh-command-drain [--queue DIR] [--dry-run] [--retry-pending]
 #
 # Drain the verified-command queue (default ~/.local/state/github-events/ops):
 # for each command event the github-event-router plugin wrote, ask the GitHub

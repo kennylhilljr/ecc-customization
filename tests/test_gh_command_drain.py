@@ -32,6 +32,11 @@ FAKE_TOKEN = """#!/bin/sh
 printf '%s\\n' "$FAKE_TOKEN"
 """
 FAKE_OPENCLAW = """#!/bin/sh
+case "$1" in
+  health) echo "$*" >> "$AGENT_LOG.health"; exit "${FAKE_HEALTH_EXIT:-0}" ;;
+  message) printf '%s\\n' "$@" > "$AGENT_LOG.alert.$$"; echo "$$" >> "$AGENT_LOG.alerts"
+           exit "${FAKE_ALERT_EXIT:-0}" ;;
+esac
 printf '%s\\n' "$@" > "$AGENT_LOG.argv.$$"
 file=""
 prev=""
@@ -50,8 +55,31 @@ def comment(cid, body="@openclaw please fix", login="kennylhilljr", type_="User"
             "issue_url": f"{API}/repos/{repo}/issues/{number}"}
 
 
+def review_comment(cid, body="@openclaw fix this line", created=IN_WINDOW, repo="octo/app", number=7, **kw):
+    c = comment(cid, body, created=created, repo=repo, number=number, **kw)
+    del c["issue_url"]
+    c["html_url"] = f"https://github.com/{repo}/pull/{number}#discussion_r{cid}"
+    c["pull_request_url"] = f"{API}/repos/{repo}/pulls/{number}"
+    return c
+
+
+def review(rid, body="@openclaw address these", submitted=IN_WINDOW, repo="octo/app", number=7, **kw):
+    c = review_comment(rid, body, repo=repo, number=number, **kw)
+    del c["created_at"]
+    c["submitted_at"] = submitted
+    c["html_url"] = f"https://github.com/{repo}/pull/{number}#pullrequestreview-{rid}"
+    return c
+
+
+class Paged:
+    """A route answered over several pages, with Link rel="next" headers."""
+
+    def __init__(self, pages):
+        self.pages = pages
+
+
 class FakeGitHub:
-    """Answers by request path. routes maps a path to a JSON value or an int HTTP status."""
+    """Answers by request path. routes maps a path to a JSON value, a Paged, or an int HTTP status."""
 
     def __init__(self, routes):
         self.routes = routes
@@ -63,6 +91,12 @@ class FakeGitHub:
         reply = self.routes.get(parts.path, 404)
         if isinstance(reply, int):
             return reply, {}, json.dumps({"message": "Not Found"}).encode()
+        if isinstance(reply, Paged):
+            page = int(dict(urllib.parse.parse_qsl(parts.query)).get("page", "1"))
+            hdrs = {}
+            if page < len(reply.pages):
+                hdrs["link"] = f'<{API}{parts.path}?per_page=100&page={page + 1}>; rel="next"'
+            return 200, hdrs, json.dumps(reply.pages[page - 1]).encode()
         return 200, {}, json.dumps(reply).encode()
 
 
@@ -112,12 +146,12 @@ class DrainTest(unittest.TestCase):
             json.dump(ev, fh)
         return path
 
-    def run_drain(self, *args, routes=None, env=None):
+    def run_drain(self, *args, routes=None, env=None, run=None):
         gh = FakeGitHub(routes or {})
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.dict(os.environ, dict(self.env, **(env or {}))):
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                code = drain.main(list(args), http_get=gh)
+                code = drain.main(list(args), http_get=gh, run=run)
         self.output = out.getvalue() + err.getvalue()
         self.assertNotIn(TOKEN, self.output)
         return code, gh
@@ -134,6 +168,25 @@ class DrainTest(unittest.TestCase):
             base = f"{self.agent_log}.%s.{pid}"
             runs.append((read(base % "argv").splitlines(), read(base % "msg"), read(base % "mode").strip()))
         return runs
+
+    def health_checks(self):
+        p = f"{self.agent_log}.health"
+        if not os.path.exists(p):
+            return []
+        with open(p) as fh:
+            return fh.read().splitlines()
+
+    def alerts(self):
+        """[argv] for each fake `openclaw message send`, in order."""
+        p = f"{self.agent_log}.alerts"
+        if not os.path.exists(p):
+            return []
+        out = []
+        with open(p) as fh:
+            for pid in fh.read().split():
+                with open(f"{self.agent_log}.alert.{pid}") as a:
+                    out.append(a.read().splitlines())
+        return out
 
     def listing(self, d):
         return sorted(os.listdir(d)) if os.path.isdir(d) else []
@@ -261,6 +314,8 @@ class DrainTest(unittest.TestCase):
         self.assertFalse(os.path.exists(argv[4]))
         self.assertFalse(os.path.exists(os.path.dirname(argv[4])))
         self.assertEqual(self.load_state()["repos"], {"octo/app": 105})
+        self.assertEqual(self.health_checks(), ["health --timeout 5000"])
+        self.assertEqual(self.alerts(), [])
         self.assertEqual(os.stat(self.state).st_mode & 0o777, 0o600)
         (p, q, headers), = gh.calls
         self.assertEqual(q, {"per_page": "100", "since": "2026-11-04T00:47:03Z"})
@@ -305,15 +360,19 @@ class DrainTest(unittest.TestCase):
 
     def test_number_null_uses_repo_wide_endpoint(self):
         self.event(number=None)
-        routes = {"/repos/octo/app/issues/comments": [comment(130, number=9)]}
+        routes = {"/repos/octo/app/issues/comments": [comment(130, number=9)],
+                  "/repos/octo/app/pulls/comments": [review_comment(131, number=4)]}
         code, gh = self.run_drain(routes=routes)
         self.assertEqual(code, 0, self.output)
-        (p, q, _), = gh.calls
-        self.assertEqual(p, "/repos/octo/app/issues/comments")
-        self.assertEqual(q, {"sort": "created", "direction": "desc", "per_page": "100",
-                             "since": "2026-11-04T00:47:03Z"})
-        (_, msg, _), = self.agent_runs()
-        self.assertIn("\nOn: octo/app#9\n", msg)
+        self.assertEqual([c[0] for c in gh.calls], ["/repos/octo/app/issues/comments",
+                                                    "/repos/octo/app/pulls/comments"])
+        for _, q, _ in gh.calls:
+            self.assertEqual(q, {"sort": "created", "direction": "desc", "per_page": "100",
+                                 "since": "2026-11-04T00:47:03Z"})
+        msgs = [m for _, m, _ in self.agent_runs()]
+        self.assertEqual(len(msgs), 2)
+        self.assertIn("\nOn: octo/app#9\n", msgs[0])
+        self.assertIn("\nOn: octo/app#4\n", msgs[1])
 
     def test_repo_null_lists_installation_repos(self):
         self.event(repo=None, number=None)
@@ -322,39 +381,291 @@ class DrainTest(unittest.TestCase):
                 {"full_name": "octo/app"}, {"full_name": "octo/lib"}]},
             "/repos/octo/app/issues/comments": [comment(150, repo="octo/app", number=1)],
             "/repos/octo/lib/issues/comments": [comment(140, repo="octo/lib", number=2)],
+            "/repos/octo/app/pulls/comments": [], "/repos/octo/lib/pulls/comments": [],
         }
         code, gh = self.run_drain(routes=routes)
         self.assertEqual(code, 0, self.output)
         self.assertEqual([c[0] for c in gh.calls], ["/installation/repositories",
                                                     "/repos/octo/app/issues/comments",
-                                                    "/repos/octo/lib/issues/comments"])
+                                                    "/repos/octo/app/pulls/comments",
+                                                    "/repos/octo/lib/issues/comments",
+                                                    "/repos/octo/lib/pulls/comments"])
         self.assertEqual(gh.calls[0][1], {"per_page": "100"})
         msgs = [m for _, m, _ in self.agent_runs()]
         self.assertIn("On: octo/lib#2", msgs[0])
         self.assertIn("On: octo/app#1", msgs[1])
         self.assertEqual(self.load_state()["repos"], {"octo/app": 150, "octo/lib": 140})
 
-    # ---- failures
-    def test_agent_failure_defers_without_advancing(self):
+    # ---- pull request sources
+    def test_pull_request_review_comment_and_review_body(self):
+        self.event(target_kind="pull_request")
+        routes = {
+            "/repos/octo/app/issues/7/comments": [comment(300, created="2026-11-04T01:00:00Z")],
+            "/repos/octo/app/pulls/7/comments": [review_comment(300, created="2026-11-04T01:00:30Z"),
+                                                 review_comment(301, login="someone")],
+            "/repos/octo/app/pulls/7/reviews": [review(300, submitted="2026-11-04T01:01:30Z"),
+                                                review(302, body=""), review(303, body="looks good"),
+                                                review(304, submitted=BEFORE_WINDOW),
+                                                review(305, submitted=None)],
+        }
+        code, gh = self.run_drain(routes=routes)
+        self.assertEqual(code, 0, self.output)
+        self.assertEqual([c[0] for c in gh.calls], ["/repos/octo/app/issues/7/comments",
+                                                    "/repos/octo/app/pulls/7/comments",
+                                                    "/repos/octo/app/pulls/7/reviews"])
+        self.assertEqual(gh.calls[2][1], {"per_page": "100"})
+        msgs = [m for _, m, _ in self.agent_runs()]
+        self.assertEqual(len(msgs), 3)  # the same id 300 in each source is three different comments
+        self.assertIn("Comment: https://github.com/octo/app/issues/7#issuecomment-300\n", msgs[0])
+        self.assertIn("Comment: https://github.com/octo/app/pull/7#discussion_r300\nOn: octo/app#7\n\n"
+                      "@openclaw fix this line", msgs[1])
+        self.assertIn("Comment: https://github.com/octo/app/pull/7#pullrequestreview-300\nOn: octo/app#7\n\n"
+                      "@openclaw address these", msgs[2])
+        state = self.load_state()
+        self.assertEqual(state["delivered"]["octo/app"],
+                         ["issue_comment:300", "review_comment:300", "review:300"])
+        self.assertEqual(state["pending"], {})
+        # nothing is delivered twice
+        self.event(target_kind="pull_request")
+        self.run_drain(routes=routes)
+        self.assertEqual(len(self.agent_runs()), 3)
+
+    def test_unknown_target_kind_treats_404_as_issue(self):
+        path = self.event(target_kind=None)
+        routes = {"/repos/octo/app/issues/7/comments": [comment(310)]}
+        code, gh = self.run_drain(routes=routes)
+        self.assertEqual(code, 0, self.output)
+        self.assertFalse(os.path.exists(path))
+        self.assertEqual([c[0] for c in gh.calls], ["/repos/octo/app/issues/7/comments",
+                                                    "/repos/octo/app/pulls/7/comments"])
+        self.assertEqual(len(self.agent_runs()), 1)
+
+    def test_pull_request_404_defers(self):
+        path = self.event(target_kind="pull_request")
+        code, _ = self.run_drain(routes={"/repos/octo/app/issues/7/comments": []})
+        self.assertEqual(code, 1)
+        self.assertEqual(self.listing(self.deferred), [os.path.basename(path)])
+
+    def test_integer_state_ids_migrate_to_issue_comments(self):
+        os.makedirs(self.state_dir)
+        with open(self.state, "w") as fh:
+            json.dump({"repos": {"octo/app": 320}, "delivered": {"octo/app": [320]}}, fh)
+        self.event(target_kind="pull_request")
+        routes = {"/repos/octo/app/issues/7/comments": [comment(320)],
+                  "/repos/octo/app/pulls/7/comments": [review_comment(320)],
+                  "/repos/octo/app/pulls/7/reviews": []}
+        code, _ = self.run_drain(routes=routes)
+        self.assertEqual(code, 0, self.output)
+        (_, msg, _), = self.agent_runs()
+        self.assertIn("#discussion_r320", msg)
+        self.assertEqual(self.load_state()["delivered"]["octo/app"], ["issue_comment:320", "review_comment:320"])
+
+    def test_too_many_pages_defers(self):
+        path = self.event()
+        pages = [[comment(400 + i)] for i in range(drain.MAX_PAGES + 1)]
+        code, gh = self.run_drain(routes={"/repos/octo/app/issues/7/comments": Paged(pages)})
+        self.assertEqual(code, 1)
+        self.assertEqual(len(gh.calls), drain.MAX_PAGES)
+        self.assertIn(f"more than {drain.MAX_PAGES} pages", self.output)
+        self.assertEqual(self.listing(self.deferred), [os.path.basename(path)])
+        self.assertEqual(self.agent_runs(), [])
+
+    def test_pages_followed(self):
+        self.event()
+        pages = [[comment(410)], [comment(411)]]
+        code, gh = self.run_drain(routes={"/repos/octo/app/issues/7/comments": Paged(pages)})
+        self.assertEqual(code, 0, self.output)
+        self.assertEqual(len(self.agent_runs()), 2)
+
+    # ---- the delivery journal
+    def test_journal_write_failure_defers_without_invoking(self):
+        path = self.event()
+        real = drain.write_json_atomic
+
+        def failing(target, data, *a, **kw):
+            if os.path.basename(str(target)) == "state.json":
+                raise OSError(28, "No space left on device")
+            return real(target, data, *a, **kw)
+        with mock.patch.object(drain, "write_json_atomic", failing):
+            code, _ = self.run_drain(routes={"/repos/octo/app/issues/7/comments": [comment(500)]})
+        self.assertEqual(code, 1)
+        self.assertEqual(self.agent_runs(), [])
+        self.assertIn("could not record the pending run", self.output)
+        self.assertEqual(self.listing(self.deferred), [os.path.basename(path)])
+        self.assertFalse(os.path.exists(self.state))
+
+    def run_crashing(self, routes):
+        """A drain run whose process dies right after `openclaw agent` returns."""
+        def crash(argv, *a, **kw):
+            r = subprocess.run(argv, *a, **kw)
+            if argv[1:2] == ["agent"]:
+                raise KeyboardInterrupt("simulated crash after the agent run")
+            return r
+        gh = FakeGitHub(routes)
+        with mock.patch.dict(os.environ, self.env), contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(KeyboardInterrupt):
+                drain.main([], http_get=gh, run=crash)
+
+    def test_crash_after_invoke_is_not_repeated(self):
+        path = self.event()
+        routes = {"/repos/octo/app/issues/7/comments": [comment(510)]}
+        self.run_crashing(routes)
+        self.assertEqual(len(self.agent_runs()), 1)
+        self.assertTrue(os.path.exists(path))  # the event stayed in the queue
+        pending = self.load_state()["pending"]["octo/app"]["issue_comment:510"]
+        self.assertEqual(pending["url"], "https://github.com/octo/app/issues/7#issuecomment-510")
+        code, _ = self.run_drain(routes=routes)
+        self.assertEqual(code, 0, self.output)
+        self.assertEqual(len(self.agent_runs()), 1)
+        self.assertIn("not waking the ops agent again for https://github.com/octo/app/issues/7#issuecomment-510",
+                      self.output)
+        self.assertFalse(os.path.exists(path))
+        # --retry-pending clears the entry, so the next event for the comment delivers it
+        self.event()
+        code, _ = self.run_drain("--retry-pending", routes=routes)
+        self.assertEqual(code, 0, self.output)
+        self.assertIn("clearing the pending entry", self.output)
+        self.assertEqual(len(self.agent_runs()), 2)
+        state = self.load_state()
+        self.assertEqual(state["pending"], {})
+        self.assertEqual(state["delivered"]["octo/app"], ["issue_comment:510"])
+
+    def test_retry_pending_dry_run_keeps_entry(self):
+        self.event()
+        self.run_crashing({"/repos/octo/app/issues/7/comments": [comment(520)]})
+        before = self.load_state()
+        code, _ = self.run_drain("--retry-pending", "--dry-run",
+                                 routes={"/repos/octo/app/issues/7/comments": [comment(520)]})
+        self.assertEqual(code, 0, self.output)
+        self.assertIn("would clear the pending entry", self.output)
+        self.assertEqual(self.load_state(), before)
+
+    def assert_unknown_outcome_kept_pending(self, detail, **kw):
+        path = self.event()
+        routes = {"/repos/octo/app/issues/7/comments": [comment(530), comment(531)]}
+        code, _ = self.run_drain(routes=routes, **kw)
+        first_output = self.output
+        self.assertEqual(code, 1)
+        self.assertIn("stays pending", first_output)
+        self.assertEqual(len(self.agent_runs()), 1)
+        url = "https://github.com/octo/app/issues/7#issuecomment-530"
+        self.assertEqual(self.alerts(), [[
+            "message", "send", "--channel", "slack", "--target", "channel:C0CERFQ8UJV", "-m",
+            f"openclaw-gh-command-drain: the ops agent run for {url} did not finish cleanly ({detail}). "
+            f"It was not resent. If nothing was posted, run: openclaw-gh-command-drain --retry-pending"]])
+        state = self.load_state()
+        self.assertEqual(list(state["pending"]["octo/app"]), ["issue_comment:530"])
+        self.assertNotIn("octo/app", state["repos"])
+        name = os.path.basename(path)
+        self.assertEqual(self.listing(self.deferred), [name])
+        # the retry skips the pending comment, delivers the next one, and finishes the event
+        os.replace(os.path.join(self.deferred, name), path)
+        code, _ = self.run_drain(routes=routes)
+        self.assertEqual(code, 0, self.output)
+        self.assertIn("not waking the ops agent again for https://github.com/octo/app/issues/7#issuecomment-530",
+                      self.output)
+        runs = self.agent_runs()
+        self.assertEqual(len(runs), 2)
+        self.assertIn("#issuecomment-531", runs[1][1])
+        self.assertFalse(os.path.exists(path))
+        self.assertEqual(list(self.load_state()["pending"]["octo/app"]), ["issue_comment:530"])
+        self.assertEqual(len(self.alerts()), 1)  # skipping a pending comment does not alert again
+        return first_output
+
+    def test_nonzero_exit_keeps_pending(self):
+        self.assert_unknown_outcome_kept_pending("exit 1", env={"FAKE_AGENT_EXIT": "1"})
+
+    def test_alert_failure_changes_nothing(self):
+        out = self.assert_unknown_outcome_kept_pending("exit 4", env={"FAKE_AGENT_EXIT": "4", "FAKE_ALERT_EXIT": "9"})
+        self.assertIn("alert: openclaw message send exited 9", out)
+
+    def test_alert_that_cannot_run_or_times_out_changes_nothing(self):
+        for exc in (OSError(2, "No such file"), subprocess.TimeoutExpired("openclaw", 60)):
+            with self.subTest(exc=type(exc).__name__):
+                def alert_breaks(argv, *a, **kw):
+                    if argv[1:2] == ["message"]:
+                        raise exc
+                    return subprocess.run(argv, *a, **kw)
+                path = self.event(name=f"{type(exc).__name__}-command.json")
+                routes = {"/repos/octo/app/issues/7/comments": [comment(540 + len(self.agent_runs()))]}
+                code, _ = self.run_drain(routes=routes, env={"FAKE_AGENT_EXIT": "1"}, run=alert_breaks)
+                self.assertEqual(code, 1)
+                self.assertIn("alert: ", self.output)
+                self.assertIn(os.path.basename(path), self.listing(self.deferred))
+                cid = routes["/repos/octo/app/issues/7/comments"][0]["id"]
+                self.assertIn(f"issue_comment:{cid}", self.load_state()["pending"]["octo/app"])
+
+    def test_timeout_keeps_pending(self):
+        def timing_out(argv, *a, **kw):
+            r = subprocess.run(argv, *a, **kw)
+            if argv[1:2] == ["agent"]:
+                raise subprocess.TimeoutExpired(argv, kw.get("timeout"))
+            return r
+        out = self.assert_unknown_outcome_kept_pending("timeout", run=timing_out)
+        self.assertIn("agent: openclaw agent timed out", out)
+
+    def test_agent_not_started_clears_pending_and_retries(self):
         path = self.event()
         routes = {"/repos/octo/app/issues/7/comments": [comment(160), comment(161)]}
-        code, _ = self.run_drain(routes=routes, env={"FAKE_AGENT_EXIT": "3"})
+        def agent_missing(argv, *a, **kw):
+            if argv[1:2] == ["agent"]:
+                raise FileNotFoundError(2, "No such file or directory")
+            return subprocess.run(argv, *a, **kw)
+        code, _ = self.run_drain(routes=routes, run=agent_missing)
         self.assertEqual(code, 1)
-        self.assertEqual(len(self.agent_runs()), 1)
-        self.assertFalse(os.path.exists(path))
+        self.assertIn("could not run openclaw", self.output)
+        self.assertEqual(self.agent_runs(), [])
+        self.assertEqual(self.alerts(), [])
         name = os.path.basename(path)
         self.assertEqual(self.listing(self.deferred), [name])
         with open(os.path.join(self.deferred, name)) as fh:
             self.assertEqual(json.load(fh)["attempts"], 1)
-        self.assertFalse(os.path.exists(self.state))
-        # a later command for the same repository goes first; the deferred one still gets its comment
+        self.assertEqual(self.load_state()["pending"], {})
+        self.assertNotIn("octo/app", self.load_state()["repos"])
+        # a later command for the same repository goes first; the deferred one still gets its comments
         self.event()
         routes2 = {"/repos/octo/app/issues/7/comments": [comment(160), comment(161), comment(170)]}
         code, _ = self.run_drain(routes=routes2)
         self.assertEqual(code, 0, self.output)
+        self.assertEqual(len(self.agent_runs()), 3)
+        os.replace(os.path.join(self.deferred, name), path)
+        code, _ = self.run_drain(routes=routes)
+        self.assertEqual(code, 0, self.output)
+        self.assertEqual(len(self.agent_runs()), 3)
         self.assertEqual(self.load_state()["repos"], {"octo/app": 170})
-        self.assertEqual(len(self.agent_runs()), 4)
+        self.assertEqual(self.listing(self.queue), [])
 
+    # ---- gateway probe
+    def test_gateway_unreachable_defers_without_pending(self):
+        first = self.event()
+        second = self.event()
+        code, _ = self.run_drain(routes={"/repos/octo/app/issues/7/comments": [comment(600)]},
+                                 env={"FAKE_HEALTH_EXIT": "1"})
+        self.assertEqual(code, 1)
+        self.assertIn("gateway not reachable", self.output)
+        self.assertEqual(self.health_checks(), ["health --timeout 5000"])  # once per run
+        self.assertEqual(self.agent_runs(), [])
+        self.assertEqual(self.alerts(), [])
+        self.assertFalse(os.path.exists(self.state))
+        self.assertEqual(self.listing(self.deferred), sorted(os.path.basename(p) for p in (first, second)))
+
+    def test_gateway_probe_that_cannot_run_defers(self):
+        path = self.event()
+        missing = os.path.join(self.tmp.name, "no-such-openclaw")
+        code, _ = self.run_drain(routes={"/repos/octo/app/issues/7/comments": [comment(610)]},
+                                 env={"OPENCLAW_BIN": missing})
+        self.assertEqual(code, 1)
+        self.assertIn("gateway not reachable", self.output)
+        self.assertEqual(self.listing(self.deferred), [os.path.basename(path)])
+        self.assertFalse(os.path.exists(self.state))
+
+    def test_gateway_probe_not_run_without_comments(self):
+        self.event()
+        code, _ = self.run_drain(routes={"/repos/octo/app/issues/7/comments": []})
+        self.assertEqual(code, 0, self.output)
+        self.assertEqual(self.health_checks(), [])
+
+    # ---- failures
     def test_partial_delivery_advances_only_delivered(self):
         self.event()
         routes = {"/repos/octo/app/issues/7/comments": [comment(160), comment(161)]}
@@ -365,7 +676,9 @@ class DrainTest(unittest.TestCase):
             fh.write(script)
         code, _ = self.run_drain(routes=routes)
         self.assertEqual(code, 1)
-        self.assertEqual(self.load_state()["repos"], {"octo/app": 160})
+        state = self.load_state()
+        self.assertEqual(state["repos"], {"octo/app": 160})
+        self.assertEqual(list(state["pending"]["octo/app"]), ["issue_comment:161"])
         self.assertEqual(len(self.listing(self.deferred)), 1)
 
     def test_token_failure_defers(self):
