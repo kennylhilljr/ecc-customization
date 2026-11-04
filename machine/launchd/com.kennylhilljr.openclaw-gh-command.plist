@@ -6,8 +6,8 @@
 	<string>com.kennylhilljr.openclaw-gh-command</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/bin/sh</string>
-		<string>/Users/bkh223/Documents/GitHub/ecc-customization/bin/openclaw-gh-command-drain</string>
+		<string>/Library/Frameworks/Python.framework/Versions/3.13/bin/python3</string>
+		<string>/Users/bkh223/Documents/GitHub/ecc-customization/lib/gh_command_drain.py</string>
 	</array>
 	<key>QueueDirectories</key>
 	<array>
