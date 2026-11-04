@@ -1,0 +1,35 @@
+{
+  "id": "github-event-router",
+  "name": "GitHub Event Router",
+  "description": "Claims GitHub Slack app posts in the GitHub feed channel and writes one queue file per issue or pull request event for issue-worker-bots and pr-review-bots. Posts that contain @openclaw go to the normal agent turn.",
+  "categories": [
+    "developer-tools"
+  ],
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "channelId": {
+        "type": "string",
+        "pattern": "^[CG][A-Z0-9]{6,}$",
+        "description": "Slack channel id of the GitHub feed (default C0CEMPH1L0N)."
+      },
+      "queueRoot": {
+        "type": "string",
+        "description": "Absolute directory that holds the iwb/ and prbot/ queues (default ~/.local/state/github-events)."
+      },
+      "botSenderIds": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "pattern": "^[BUW][A-Z0-9]{6,}$"
+        },
+        "maxItems": 16,
+        "description": "Slack sender ids that count as the GitHub app. When empty, any sender id that starts with B (a Slack bot_id) counts."
+      }
+    }
+  }
+}

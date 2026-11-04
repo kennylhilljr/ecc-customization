@@ -1,0 +1,44 @@
+{
+  "name": "openclaw-github-event-router",
+  "version": "0.1.0",
+  "private": true,
+  "description": "OpenClaw plugin that turns GitHub Slack app posts into queue files for issue-worker-bots and pr-review-bots.",
+  "type": "module",
+  "license": "UNLICENSED",
+  "main": "./index.js",
+  "files": [
+    "index.js",
+    "src/",
+    "openclaw.plugin.json",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {},
+  "devDependencies": {},
+  "peerDependencies": {
+    "openclaw": "2026.9.6"
+  },
+  "peerDependenciesMeta": {
+    "openclaw": {
+      "optional": true
+    }
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.js"
+    ],
+    "compat": {
+      "pluginApi": ">=2026.9.6",
+      "minGatewayVersion": "2026.9.6"
+    },
+    "build": {
+      "openclawVersion": "2026.9.6",
+      "pluginSdkVersion": "2026.9.6"
+    }
+  },
+  "scripts": {
+    "test": "node --test tests/*.test.js"
+  }
+}

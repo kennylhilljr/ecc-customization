@@ -11,6 +11,7 @@ This file is for agents changing this repository. The files in `kit/` (`kit/AGEN
 - `kit/`: project templates. Every file under `kit/` except `kit/gitignore` is copied into the destination project, and `{{NAME}}`-style placeholders are filled from `KIT_VARS` in `lib/ecctools.py`. An unknown placeholder makes rendering fail. A new file in `kit/` reaches every project on its next `ecc-kit sync`.
 - `skills/`: user-level skills. `bootstrap.sh` links each folder that has a `SKILL.md` into `~/.claude/skills` and `~/.agents/skills`. Keep the list in `skills/README.md` current.
 - `machine/`: snapshot output (`manifest.json`, `home/`), written only by `bin/ecc-snapshot`. The exception is `machine/ops/workspace-ops.settings.json`, which is edited by hand and merged into the OpenClaw ops agent's `.claude/settings.json` by the `ops` step.
+- `openclaw-plugins/`: OpenClaw plugins kept here and installed by hand with `openclaw plugins install --link`. `github-event-router` is plain ES module JavaScript with no dependencies and `node --test` tests; see its README for install and rollback. `bootstrap.sh` does not install it.
 - `tests/`: `unittest` tests. They use temporary home folders and fake `security` and `curl` commands.
 - `.githooks/pre-commit`: runs `lib/ecctools.py scan` on staged files. It runs only when `git config core.hooksPath` prints `.githooks`.
 
@@ -26,7 +27,8 @@ python3 -c "import ast; ast.parse(open('lib/ecctools.py').read())"
 python3 lib/ecctools.py --help
 bin/ecc-kit new --help
 ./bootstrap.sh --help
-python3 lib/ecctools.py scan README.md AGENTS.md stack.conf docs kit skills machine
+python3 lib/ecctools.py scan README.md AGENTS.md stack.conf docs kit skills machine openclaw-plugins
+(cd openclaw-plugins/github-event-router && npm test)
 git diff --check
 ```
 

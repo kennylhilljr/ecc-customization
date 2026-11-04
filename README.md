@@ -36,6 +36,7 @@ flowchart LR
 | [bin/ecc-kit](bin/ecc-kit) | Creates, compares and syncs project templates |
 | [bin/ecc-snapshot](bin/ecc-snapshot) | Captures selected user settings; optionally invokes the external OpenClaw backup tool |
 | [bin/openclaw-gh-app-token](bin/openclaw-gh-app-token) | Prints a GitHub installation token for the `openclaw-ops-assist` App (bash) |
+| [openclaw-plugins/github-event-router/](openclaw-plugins/github-event-router/README.md) | OpenClaw plugin that queues GitHub Slack app posts for issue-worker-bots and pr-review-bots; installed by hand, not by `bootstrap.sh` |
 | [machine/ops/](machine/ops/workspace-ops.settings.json) | Tracked Claude Code settings for the OpenClaw ops agent, merged by the `ops` step |
 | [tests/](tests/) | `unittest` tests for the `ops` step, the settings merge and the token command |
 | [lib/ecctools.py](lib/ecctools.py) | Python helpers for templates, snapshots, restores, plugin registration and secret scanning |
@@ -252,6 +253,12 @@ bin/ecc-kit new --help
 ./bootstrap.sh --help
 python3 lib/ecctools.py scan README.md stack.conf docs
 git diff --check
+```
+
+The OpenClaw plugin under `openclaw-plugins/github-event-router` has its own Node tests (Node 22 or newer, no dependencies, temporary folders only):
+
+```sh
+(cd openclaw-plugins/github-event-router && npm test)
 ```
 
 The scan returns `0` with no output when it finds no recognized patterns, or `1` with file/line/kind findings. These checks validate syntax and basic CLI entry points; they do not test macOS installation, provider authentication, external runtime behavior or background jobs. Test behavior changes with temporary destinations and fake data, never real credentials or personal settings.
