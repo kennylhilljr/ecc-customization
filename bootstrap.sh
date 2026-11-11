@@ -436,7 +436,12 @@ summary() {
 
 [ $DRY -eq 1 ] && say "dry run: nothing will change"
 # This repository's own guard: refuse commits that stage anything secret-shaped.
-[ $DRY -eq 1 ] || git -C "$HERE" config core.hooksPath .githooks 2>/dev/null
+# ECC_BOOTSTRAP_NO_HOOKS=1 leaves Git config alone: the tests set it, since in a
+# linked worktree this writes the config every worktree of the clone shares.
+if [ $DRY -eq 0 ] && [ "${ECC_BOOTSTRAP_NO_HOOKS:-0}" != 1 ] \
+    && [ "$(git -C "$HERE" config --get core.hooksPath 2>/dev/null)" != .githooks ]; then
+  git -C "$HERE" config core.hooksPath .githooks 2>/dev/null
+fi
 for s in $ALL_STEPS; do
   want "$s" || continue
   load_brew >/dev/null 2>&1

@@ -14,7 +14,7 @@ This file is for agents changing this repository. The files in `kit/` (`kit/AGEN
 - `machine/`: snapshot output (`manifest.json`, `home/`), written only by `bin/ecc-snapshot`. The exception is `machine/ops/workspace-ops.settings.json`, which is edited by hand and merged into the OpenClaw ops agent's `.claude/settings.json` by the `ops` step, and `machine/launchd/`, which holds hand-maintained launchd plists installed by hand (see README).
 - `openclaw-plugins/`: OpenClaw plugins kept here and installed by hand with `openclaw plugins install --link`. `github-event-router` is plain ES module JavaScript with no dependencies and `node --test` tests; see its README for install and rollback. `bootstrap.sh` does not install it.
 - `tests/`: `unittest` tests. They use temporary home folders and fake `security`, `curl`, token and `openclaw` commands; `test_gh_command_drain.py` also fakes the GitHub API.
-- `.githooks/pre-commit`: runs `lib/ecctools.py scan` on staged files. It runs only when `git config core.hooksPath` prints `.githooks`.
+- `.githooks/pre-commit`: runs `lib/ecctools.py scan` on staged files. It runs only when `git config core.hooksPath` prints `.githooks`. `bootstrap.sh` sets that unless `ECC_BOOTSTRAP_NO_HOOKS=1`, which the tests set.
 
 ## Checks
 
@@ -39,6 +39,7 @@ The scan prints nothing and exits 0 when clean, or exits 1 and names file, line 
 ## Do not run
 
 - `./bootstrap.sh` with anything but `--help` (the tests run `--only ops` with a temporary `HOME`; never with your own). Even `--dry-run` probes the real machine, for example `security find-generic-password` for each Keychain name in the `secrets` step.
+- `git config` that writes the repository config (for example `git config core.hooksPath .githooks`). Agent worktrees share one `.git/config` with every other worktree of the clone, and the orchestrator stops the unit when it changes. Leave the hook off; the checks above cover the scan.
 - `bin/ecc-snapshot`. It has no help switch and always rewrites `machine/` from your home folder.
 - `bin/openclaw-gh-command-drain` without `--dry-run`: it moves real queue files and runs `openclaw agent`. Do not run `bin/openclaw-gh-app-token` for real either.
 - `bin/ecc`, `lib/ecctools.py restore`, `openclaw-restore` or `openclaw-plugin` against the real home folder or OpenClaw state. Use temporary folders and fake data.
