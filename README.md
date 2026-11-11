@@ -43,7 +43,7 @@ flowchart LR
 | [tests/](tests/) | `unittest` tests for the `ops` step, the settings merge, the token command and the command drain |
 | [lib/ecctools.py](lib/ecctools.py) | Python helpers for templates, snapshots, restores, plugin registration and secret scanning |
 | [kit/](kit/) | Agent instructions, build/review skills, lessons ledger and orchestration templates |
-| [skills/](skills/README.md) | Shared ECC operation, EARS notation and product requirements skills; SDD reference documents |
+| [skills/](skills/README.md) | Shared ECC operation, EARS notation and product requirements skills |
 | [machine/](machine/README.md) | Snapshot destination (no captured manifest yet), plus the hand-maintained `machine/ops/` settings |
 | [.githooks/pre-commit](.githooks/pre-commit) | Scans staged file contents for secret-shaped strings |
 | [docs/REDEPLOY.md](docs/REDEPLOY.md) | Migration procedure, owner tasks and recovery notes |
@@ -337,7 +337,7 @@ The scan returns `0` with no output when it finds no recognized patterns, or `1`
 
 Keep changes focused and explain which source behavior each documentation claim describes. Run the smoke checks above, review the diff for credentials and private paths, and include results and platform limitations in your pull request. For helper behavior changes, add meaningful tests with fake inputs and temporary state; do not use a real machine snapshot as a fixture.
 
-Port reusable project practices into `kit/` after comparing with `ecc-kit diff`; preserve project-specific customizations. Shared skills need a `SKILL.md` and belong under `skills/`; destination-project skills belong in that project's `.agents/skills/`. Keep stack changes in `stack.conf`, and distinguish exact versions from floating dependencies. Existing SDD references describe designs and proposals, not evidence that corresponding tooling exists here.
+Port reusable project practices into `kit/` after comparing with `ecc-kit diff`; preserve project-specific customizations. Shared skills need a `SKILL.md` and belong under `skills/`; destination-project skills belong in that project's `.agents/skills/`. Keep stack changes in `stack.conf`, and distinguish exact versions from floating dependencies.
 
 ## License
 
