@@ -244,6 +244,8 @@ bin/ecc-kit sync ../my-project
 
 ### Operate an ECC project
 
+Use the [plan approval runbook](skills/ecc-operator/SKILL.md#approve-plan) to record an owner's approval, regenerate and check plan artifacts, commit on the plan branch, and optionally fast-forward the target when the owner authorizes merging. It prints the next ECC commands without dispatching work.
+
 After the external runtime and project configuration are ready, open a new terminal for the installed PATH entry, then run from the project directory:
 
 ```sh
@@ -285,6 +287,12 @@ For full OpenClaw state, `bin/ecc-snapshot --openclaw` additionally invokes the 
 The Python restore refuses an existing destination and unsafe archive members. It verifies SHA-256 **only when** a sibling `manifest.json` supplies `archive_sha256`; a missing checksum is not an integrity guarantee. See [REDEPLOY.md](docs/REDEPLOY.md) for the complete migration procedure.
 
 ## Testing
+
+`tests/test_ecc_operator.py` provides local, read-only documentation checks for the approval workflow, run replacement rules, handoff command order and README links. It does not validate research-mcp integration or execute ECC, project generators, credentials or external repositories. Run it directly with:
+
+```sh
+python3 tests/test_ecc_operator.py
+```
 
 There is no CI workflow or coverage report. `tests/` holds `unittest` tests for the `ops` step, `merge-settings`, `openclaw-gh-app-token` and `openclaw-gh-command-drain` (`tests/test_gh_command_drain.py`); they use temporary home folders, fake `security`, `curl`, token and `openclaw` commands and a fake GitHub API, so they need neither the Keychain nor the network. Run them and the smoke checks from the repository root with Bash, a POSIX shell, Git, OpenSSL and Python 3.9+:
 

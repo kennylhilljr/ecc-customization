@@ -8,6 +8,6 @@ Skills here now (folder name, which is also the link name, then the `name` in it
 
 | Folder | Frontmatter `name` | Use |
 | --- | --- | --- |
-| `ecc-operator` | `ecc-operator` | Set a repository up for ECC and start, drive or check a milestone run |
+| `ecc-operator` | `ecc-operator` | Set a repository up for ECC, [approve a plan](ecc-operator/SKILL.md#approve-plan), and start, drive or check a milestone run |
 | `ears-notation` | `ears-notation` | Write testable requirements in EARS syntax |
 | `prd-synch` | `product-requirements` | Gather requirements and write a PRD; the folder also holds the SDD reference documents and diagrams |
