@@ -1,15 +1,56 @@
 #!/bin/sh
 # Refuse a commit that stages anything secret-shaped (bootstrap.sh turns this
 # hook on with core.hooksPath). Findings name the file and line, never the value.
-HERE=$(git rev-parse --show-toplevel)
-files=$(git diff --cached --name-only --diff-filter=ACM)
-[ -n "$files" ] || exit 0
-tmp=$(mktemp -d)
+GIT=${ECC_PRECOMMIT_GIT:-git}
+HERE=$("$GIT" rev-parse --show-toplevel)
+tmp=$(mktemp -d) || exit 1
 trap 'rm -rf "$tmp" "$tmp.out"' EXIT
-for f in $files; do
-  mkdir -p "$tmp/$(dirname "$f")"
-  git show ":$f" > "$tmp/$f" 2>/dev/null || true
-done
+# Copy every staged added, copied, modified or renamed file into $tmp. NUL
+# separated names keep spaces and non-ASCII names intact; any Git failure
+# stops the commit instead of skipping the file. Gitlinks (submodules) have
+# no blob to read and are skipped.
+if ! python3 -c '
+import os, subprocess, sys
+tmp, git = os.fsencode(sys.argv[1]), sys.argv[2]
+try:
+    out = subprocess.run([git, "diff", "--cached", "--raw", "-z", "--diff-filter=ACMR"],
+                         check=True, capture_output=True).stdout
+except (subprocess.CalledProcessError, OSError):
+    print("pre-commit: could not list staged files", file=sys.stderr)
+    sys.exit(1)
+if not out:
+    sys.exit(0)
+# Each record is ":oldmode newmode oldsha newsha status" followed by one
+# path, or by the source and destination paths for R and C.
+fields = out.split(b"\0")
+paths = []
+i = 0
+while i < len(fields):
+    header = fields[i].split()
+    i += 1
+    if not header:
+        continue
+    count = 2 if len(header) == 5 and header[4][:1] in (b"R", b"C") else 1
+    if not header[0].startswith(b":") or len(header) != 5 or i + count > len(fields):
+        print("pre-commit: could not list staged files", file=sys.stderr)
+        sys.exit(1)
+    path = fields[i + count - 1]
+    i += count
+    if header[1] != b"160000":
+        paths.append(path)
+for path in paths:
+    try:
+        dest = os.path.join(tmp, path)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        with open(dest, "wb") as fh:
+            subprocess.run([git, "show", b":" + path], check=True, stdout=fh)
+    except Exception:
+        print("pre-commit: could not read staged content for "
+              + path.decode(errors="replace"), file=sys.stderr)
+        sys.exit(1)
+' "$tmp" "$GIT"; then
+  exit 1
+fi
 if ! python3 "$HERE/lib/ecctools.py" scan "$tmp" > "$tmp.out"; then
   sed "s#$tmp/##" "$tmp.out" >&2
   echo "pre-commit: refused; remove the values above (they are never printed)." >&2
