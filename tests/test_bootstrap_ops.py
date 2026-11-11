@@ -5,6 +5,7 @@ Run from the repository root: python3 -m unittest discover -s tests
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -37,7 +38,7 @@ class BootstrapOps(unittest.TestCase):
         with open(self.other, "w") as fh:
             fh.write('{"model": "sonnet"}\n')
         pydir = os.path.dirname(sys.executable)
-        self.env = {"HOME": self.home, "USER": "tester",
+        self.env = {"HOME": self.home, "USER": "tester", "ECC_BOOTSTRAP_NO_HOOKS": "1",
                     "PATH": f"{self.fake}:{pydir}:/usr/bin:/bin:/usr/sbin:/sbin"}
 
     def tearDown(self):
@@ -47,6 +48,36 @@ class BootstrapOps(unittest.TestCase):
         e = dict(self.env, **env)
         return subprocess.run([BOOTSTRAP, "--only", "ops", *args], capture_output=True, text=True,
                               env=e, stdin=subprocess.DEVNULL)
+
+    def test_repo_git_config_is_untouched(self):
+        # In a linked worktree .git/config is shared by every worktree of the
+        # clone; a test that writes it changes state outside the checkout.
+        common = subprocess.run(["git", "-C", ROOT, "rev-parse", "--git-common-dir"],
+                                capture_output=True, text=True)
+        if common.returncode != 0:
+            self.skipTest("not a git checkout")
+        config = os.path.join(ROOT, common.stdout.strip(), "config")
+        with open(config, "rb") as fh:
+            before = fh.read()
+        r = self.bootstrap()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        with open(config, "rb") as fh:
+            self.assertEqual(fh.read(), before)
+
+    def test_enables_hooks_unless_opted_out(self):
+        for opt_out, want in (("0", ".githooks\n"), ("1", "")):
+            repo = os.path.join(self.tmp.name, "repo" + opt_out)
+            os.makedirs(repo)
+            for name in ("bootstrap.sh", "stack.conf"):
+                shutil.copy2(os.path.join(ROOT, name), repo)
+            subprocess.run(["git", "init", "-q", repo], check=True)
+            r = subprocess.run([os.path.join(repo, "bootstrap.sh"), "--only", "none"], capture_output=True,
+                               text=True, env=dict(self.env, ECC_BOOTSTRAP_NO_HOOKS=opt_out),
+                               stdin=subprocess.DEVNULL)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            got = subprocess.run(["git", "-C", repo, "config", "--get", "core.hooksPath"],
+                                 capture_output=True, text=True)
+            self.assertEqual(got.stdout, want)
 
     def test_help_lists_ops_between_openclaw_and_secrets(self):
         r = subprocess.run([BOOTSTRAP, "--help"], capture_output=True, text=True)
