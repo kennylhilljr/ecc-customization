@@ -294,28 +294,31 @@ The Python restore refuses an existing destination and unsafe archive members. I
 python3 tests/test_ecc_operator.py
 ```
 
-There is no CI workflow or coverage report. `tests/` holds `unittest` tests for the `ops` step, `merge-settings`, `openclaw-gh-app-token` and `openclaw-gh-command-drain` (`tests/test_gh_command_drain.py`); they use temporary home folders, fake `security`, `curl`, token and `openclaw` commands and a fake GitHub API, so they need neither the Keychain nor the network. Run them and the smoke checks from the repository root with Bash, a POSIX shell, Git, OpenSSL and Python 3.9+:
+Kenny can install the check workflow using the YAML and instructions in [docs/ci.md](docs/ci.md).
+
+There is no CI workflow or coverage report. `tests/` holds `unittest` tests for the `ops` step, `merge-settings`, `openclaw-gh-app-token`, `openclaw-gh-command-drain` (`tests/test_gh_command_drain.py`) and the check runner. They use temporary home folders, fake `security`, `curl`, token and `openclaw` commands and a fake GitHub API, so they need neither the Keychain nor the network. Run the repository checks with Bash, a POSIX shell, Git, OpenSSL, Python 3.9 or newer, Node 22 or newer and npm. The runner finds the repository from its own path, including when called from another directory or from a checkout path containing spaces.
 
 ```sh
-python3 -m unittest discover -s tests
-bash -n bootstrap.sh stack.conf bin/openclaw-gh-app-token
-sh -n bin/ecc bin/ecc-kit bin/ecc-snapshot bin/openclaw-gh-command-drain .githooks/pre-commit
-python3 -m py_compile lib/ecctools.py lib/gh_command_drain.py
-python3 lib/ecctools.py --help
-python3 lib/ecctools.py kit-new --help
-bin/ecc-kit new --help
-./bootstrap.sh --help
-python3 lib/ecctools.py scan README.md stack.conf docs
-git diff --check
+sh scripts/check.sh
 ```
 
-The OpenClaw plugin under `openclaw-plugins/github-event-router` has its own Node tests (Node 22 or newer, no dependencies, temporary folders only):
+- `unit-tests`: run the isolated Python test suite.
+- `bash-syntax`: parse each Bash input separately.
+- `sh-syntax`: parse each POSIX shell script separately.
+- `python-syntax`: parse both Python helpers with `ast`.
+- `ecctools-help`: exercise the helper entry point.
+- `kit-help`: exercise the kit wrapper help path.
+- `bootstrap-help`: exercise the safe bootstrap help path.
+- `secret-scan`: scan the maintained repository content.
+- `plist-lint`: lint the launchd property lists.
+- `plugin-tests`: run the GitHub event router Node tests.
+- `diff-check`: check the working tree diff for whitespace errors.
 
-```sh
-(cd openclaw-plugins/github-event-router && npm test)
-```
+The runner creates temporary storage from the explicit `/tmp/ecc-check.XXXXXX` template instead of trusting an inherited `TMPDIR`. It disables Python bytecode writes, places the npm cache inside that storage, and removes the storage on normal exit or a catchable termination signal. Every check gets a status line even after an earlier failure. The final exit is 1 when any check failed and 0 otherwise. `plist-lint` prints `SKIP` with an explanation only when `plutil` is absent; an installed `plutil` that returns nonzero produces `FAIL`. Missing scripts and failed prerequisites are not skipped.
 
 The scan returns `0` with no output when it finds no recognized patterns, or `1` with file/line/kind findings. These checks validate syntax and basic CLI entry points; they do not test macOS installation, provider authentication, external runtime behavior or background jobs. Test behavior changes with temporary destinations and fake data, never real credentials or personal settings.
+
+There is no shellcheck configuration. Optional `shellcheck` runs currently report SC1007 warnings and SC1091, SC2015 and SC2016 notes; changes should not add findings.
 
 ## Troubleshooting
 

@@ -18,21 +18,25 @@ This file is for agents changing this repository. The files in `kit/` (`kit/AGEN
 
 ## Checks
 
-There is no CI workflow, bats setup or shellcheck config. Run these from the repository root after a change. None of them modify the machine:
+There is no CI workflow, bats setup or shellcheck config. Run the repository checks after a change. They require Bash, a POSIX shell, Git, OpenSSL, Python 3.9 or newer, Node 22 or newer and npm. The script resolves the repository from its own location, so it also works when invoked through an absolute or relative path from another directory.
 
 ```sh
-python3 -m unittest discover -s tests
-bash -n bootstrap.sh stack.conf bin/openclaw-gh-app-token
-sh -n bin/ecc bin/ecc-kit bin/ecc-snapshot bin/openclaw-gh-command-drain .githooks/pre-commit
-python3 -c "import ast; ast.parse(open('lib/ecctools.py').read()); ast.parse(open('lib/gh_command_drain.py').read())"
-python3 lib/ecctools.py --help
-bin/ecc-kit new --help
-./bootstrap.sh --help
-python3 lib/ecctools.py scan README.md AGENTS.md stack.conf docs kit skills machine openclaw-plugins lib bin tests
-plutil -lint machine/launchd/*.plist
-(cd openclaw-plugins/github-event-router && npm test)
-git diff --check
+sh scripts/check.sh
 ```
+
+- `unit-tests`: run the isolated Python test suite.
+- `bash-syntax`: parse each Bash input separately.
+- `sh-syntax`: parse each POSIX shell script separately.
+- `python-syntax`: parse both Python helpers with `ast`.
+- `ecctools-help`: exercise the helper entry point.
+- `kit-help`: exercise the kit wrapper help path.
+- `bootstrap-help`: exercise the safe bootstrap help path.
+- `secret-scan`: scan the repository's maintained content roots.
+- `plist-lint`: lint the maintained launchd property lists.
+- `plugin-tests`: run the GitHub event router Node tests.
+- `diff-check`: check the working tree diff for whitespace errors.
+
+The runner creates `/tmp/ecc-check.XXXXXX` storage without using the incoming `TMPDIR`, directs Python bytecode and the npm cache away from the checkout, and removes the storage on exit or a catchable termination signal. It prints one status for every check and continues after failures, then exits 1 if any check failed. `plist-lint` is skipped with an explanation only when `plutil` is unavailable; a failing `plutil` is a failed check. A missing required script or other prerequisite is also a failure.
 
 The scan prints nothing and exits 0 when clean, or exits 1 and names file, line and kind. If you run `shellcheck`, the current scripts already report SC1007 warnings and SC1091, SC2015 and SC2016 notes; do not add new findings. To try a `kit/` change, run `bin/ecc-kit new` against an empty temporary folder, never a real project.
 
