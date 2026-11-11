@@ -30,6 +30,9 @@ RECEIVED = "2026-11-04T01:02:03.123Z"
 IN_WINDOW = "2026-11-04T01:01:00Z"
 BEFORE_WINDOW = "2026-11-04T00:40:00Z"
 FMT = "%Y-%m-%dT%H:%M:%SZ"
+# The drain prunes delivered keys against the current time, and the fixtures above are fixed dates, so
+# every test runs with the drain's clock pinned shortly after RECEIVED.
+NOW = datetime(2026, 11, 4, 1, 5, 0, tzinfo=timezone.utc)
 
 FAKE_TOKEN = """#!/bin/sh
 [ "${FAKE_TOKEN_EXIT:-0}" = 0 ] || exit "$FAKE_TOKEN_EXIT"
@@ -134,6 +137,9 @@ class DrainTest(unittest.TestCase):
             "FAKE_AGENT_EXIT": "0", "FAKE_TOKEN_EXIT": "0",
         }
         self.n = 0
+        clock = mock.patch.object(drain, "utcnow", lambda: NOW)
+        clock.start()
+        self.addCleanup(clock.stop)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -829,7 +835,7 @@ class DrainTest(unittest.TestCase):
 
     def test_delivered_keys_pruned_after_seven_days(self):
         os.makedirs(self.state_dir)
-        now = datetime.now(timezone.utc)
+        now = NOW
         old, recent = (now - timedelta(days=8)).strftime(FMT), (now - timedelta(days=6)).strftime(FMT)
         with open(self.state, "w") as fh:
             json.dump({"repos": {"octo/app": 999},
@@ -848,7 +854,7 @@ class DrainTest(unittest.TestCase):
         self.assertEqual(list(lib), ["issue_comment:5", "review_comment:6"])
         for entry in lib.values():
             self.assertIsNone(entry["time"])
-            self.assertLess(now - timedelta(minutes=1), drain.parse_time(entry["first_seen"]))
+            self.assertEqual(drain.parse_time(entry["first_seen"]), NOW)
 
     # ---- moving with a rewrite
     def test_failed_deferral_write_leaves_source(self):

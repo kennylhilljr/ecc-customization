@@ -269,6 +269,11 @@ def iso(t):
     return t.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def utcnow():
+    """The current time in UTC. Tests replace this to pin the clock the state is pruned against."""
+    return datetime.now(timezone.utc)
+
+
 def load_state(path, dry_run, now=None):
     """The state, keyed by lower-case repository: "delivered" maps each "<source>:<id>" key sent to
     the agent to {"time": the comment's created_at or submitted_at}, and "pending" maps the keys whose
@@ -278,7 +283,7 @@ def load_state(path, dry_run, now=None):
     comments. Older formats are migrated: a "repos" watermark is dropped, and a list of plain integer
     ids (issue comments) or keys becomes entries with no time and "first_seen" set to now, dropped
     DELIVERED_KEEP after first_seen."""
-    now = now or datetime.now(timezone.utc)
+    now = now or utcnow()
     try:
         raw = path.read_text()
     except FileNotFoundError:
@@ -330,7 +335,7 @@ def already_handled(state, repo, source, cid):
 
 
 def mark_pending(state, repo, key, url):
-    state["pending"].setdefault(repo, {})[key] = {"since": iso(datetime.now(timezone.utc)), "url": url}
+    state["pending"].setdefault(repo, {})[key] = {"since": iso(utcnow()), "url": url}
 
 
 def clear_pending(state, repo, key):
