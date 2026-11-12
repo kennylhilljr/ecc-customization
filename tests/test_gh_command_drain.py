@@ -56,10 +56,14 @@ exit "${FAKE_AGENT_EXIT:-0}"
 
 
 def comment(cid, body="@openclaw please fix", login="kennylhilljr", type_="User", created=IN_WINDOW,
-            repo="octo/app", number=7):
-    return {"id": cid, "body": body, "user": {"login": login, "type": type_}, "created_at": created,
-            "html_url": f"https://github.com/{repo}/issues/{number}#issuecomment-{cid}",
-            "issue_url": f"{API}/repos/{repo}/issues/{number}"}
+            repo="octo/app", number=7, updated=...):
+    """An issue comment. updated_at defaults to created_at; pass updated=None to leave it out."""
+    c = {"id": cid, "body": body, "user": {"login": login, "type": type_}, "created_at": created,
+         "html_url": f"https://github.com/{repo}/issues/{number}#issuecomment-{cid}",
+         "issue_url": f"{API}/repos/{repo}/issues/{number}"}
+    if updated is not None:
+        c["updated_at"] = created if updated is ... else updated
+    return c
 
 
 def review_comment(cid, body="@openclaw fix this line", created=IN_WINDOW, repo="octo/app", number=7, **kw):
@@ -73,6 +77,8 @@ def review_comment(cid, body="@openclaw fix this line", created=IN_WINDOW, repo=
 def review(rid, body="@openclaw address these", submitted=IN_WINDOW, repo="octo/app", number=7, **kw):
     c = review_comment(rid, body, repo=repo, number=number, **kw)
     del c["created_at"]
+    if "updated" not in kw:
+        c.pop("updated_at", None)
     c["submitted_at"] = submitted
     c["html_url"] = f"https://github.com/{repo}/pull/{number}#pullrequestreview-{rid}"
     return c
@@ -180,6 +186,8 @@ class DrainTest(unittest.TestCase):
         return runs
 
     def delivered(self, repo="octo/app"):
+        if not os.path.exists(self.state):
+            return []
         return list(self.load_state()["delivered"].get(repo, {}))
 
     def health_checks(self):
@@ -715,6 +723,84 @@ class DrainTest(unittest.TestCase):
         self.assertEqual(code, 0, self.output)
         self.assertEqual(self.delivered(), ["issue_comment:812"])
         self.assertEqual(self.listing(self.deferred), [])
+
+    # ---- update time: an edit counts as a new command
+    def test_old_comment_edited_inside_window_is_delivered(self):
+        for make, source, route in ((comment, "issue_comment", "/repos/octo/app/issues/7/comments"),
+                                    (review_comment, "review_comment", "/repos/octo/app/pulls/7/comments")):
+            with self.subTest(source=source):
+                self.event(target_kind="pull_request")
+                routes = {"/repos/octo/app/issues/7/comments": [], "/repos/octo/app/pulls/7/comments": [],
+                          "/repos/octo/app/pulls/7/reviews": []}
+                routes[route] = [make(900, "@openclaw edited in", created="2026-10-01T00:00:00Z",
+                                      updated=IN_WINDOW)]
+                code, _ = self.run_drain(routes=routes)
+                self.assertEqual(code, 0, self.output)
+                self.assertIn(f"{source}:900", self.delivered())
+                self.assertEqual(self.load_state()["delivered"]["octo/app"][f"{source}:900"], {"time": IN_WINDOW})
+
+    def test_body_edited_after_window_is_not_delivered(self):
+        """A deferred event retried later must not run a body that was edited after its window."""
+        for make, source, route in ((comment, "issue_comment", "/repos/octo/app/issues/7/comments"),
+                                    (review_comment, "review_comment", "/repos/octo/app/pulls/7/comments")):
+            with self.subTest(source=source):
+                path = self.event(target_kind="pull_request")
+                os.makedirs(self.deferred, exist_ok=True)
+                deferred = os.path.join(self.deferred, os.path.basename(path))
+                os.replace(path, deferred)
+                os.utime(deferred, (time.time() - 3 * 3600, time.time() - 3 * 3600))
+                routes = {"/repos/octo/app/issues/7/comments": [], "/repos/octo/app/pulls/7/comments": [],
+                          "/repos/octo/app/pulls/7/reviews": []}
+                routes[route] = [make(910, "@openclaw rewritten later", created=IN_WINDOW,
+                                      updated="2026-11-04T04:00:00Z")]
+                code, _ = self.run_drain(routes=routes)
+                self.assertEqual(code, 0, self.output)
+                self.assertEqual(self.agent_runs(), [])
+                self.assertEqual(self.listing(self.deferred), [])
+
+    def test_missing_or_invalid_update_time_is_skipped(self):
+        self.event(target_kind="pull_request")
+        routes = {"/repos/octo/app/issues/7/comments": [comment(920, updated=None), comment(921, updated="soon"),
+                                                         comment(922, updated=17)],
+                  "/repos/octo/app/pulls/7/comments": [review_comment(923, updated=None),
+                                                       review_comment(924, updated="")],
+                  "/repos/octo/app/pulls/7/reviews": []}
+        code, _ = self.run_drain(routes=routes)
+        self.assertEqual(code, 0, self.output)
+        self.assertEqual(self.agent_runs(), [])
+
+    def test_update_time_window_bounds_are_inclusive(self):
+        start, end = "2026-11-04T00:47:03.123Z", "2026-11-04T01:04:03.123Z"
+        self.event()
+        routes = {"/repos/octo/app/issues/7/comments": [
+            comment(930, created="2026-01-01T00:00:00Z", updated=start),
+            comment(931, created="2026-01-01T00:00:00Z", updated=end),
+            comment(932, created="2026-01-01T00:00:00Z", updated="2026-11-04T00:47:03.122Z"),
+            comment(933, created="2026-01-01T00:00:00Z", updated="2026-11-04T01:04:03.124Z")]}
+        code, _ = self.run_drain(routes=routes)
+        self.assertEqual(code, 0, self.output)
+        self.assertEqual(self.delivered(), ["issue_comment:930", "issue_comment:931"])
+
+    def test_delivered_in_update_time_order(self):
+        self.event()
+        routes = {"/repos/octo/app/issues/7/comments": [
+            comment(940, "@openclaw edited last", created="2026-11-04T00:50:00Z", updated="2026-11-04T01:02:00Z"),
+            comment(941, "@openclaw written once", created="2026-11-04T01:00:00Z")]}
+        code, _ = self.run_drain(routes=routes)
+        self.assertEqual(code, 0, self.output)
+        self.assertEqual([m.rsplit("\n", 1)[1] for _, m, _ in self.agent_runs()],
+                         ["@openclaw written once", "@openclaw edited last"])
+        self.assertEqual(self.load_state()["delivered"]["octo/app"]["issue_comment:940"],
+                         {"time": "2026-11-04T01:02:00Z"})
+
+    def test_reviews_still_use_submitted_at(self):
+        self.event(target_kind="pull_request")
+        routes = {"/repos/octo/app/issues/7/comments": [], "/repos/octo/app/pulls/7/comments": [],
+                  "/repos/octo/app/pulls/7/reviews": [review(950, submitted=IN_WINDOW, updated=BEFORE_WINDOW),
+                                                      review(951, submitted=BEFORE_WINDOW, updated=IN_WINDOW)]}
+        code, _ = self.run_drain(routes=routes)
+        self.assertEqual(code, 0, self.output)
+        self.assertEqual(self.delivered(), ["review:950"])
 
     # ---- replay of the router's failed-request journal
     def journal_line(self, **extra):

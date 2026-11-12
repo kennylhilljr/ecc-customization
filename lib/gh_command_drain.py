@@ -27,9 +27,11 @@ before failing; only a run that could not be started at all clears it.
 Such a run also sends a short alert to Slack with `openclaw message send`;
 a failed alert is only logged.
 
-Only comments created from 15 minutes before to 2 minutes after the event's
-received_at count, and "@openclaw" must be a whole handle (MENTION, the same
-pattern the router uses). Each run first replays the router's failed-request
+Only comments last updated (reviews: submitted) from 15 minutes before to 2
+minutes after the event's received_at count, so an old comment edited to add a
+command counts and a body edited after the window does not; a comment without
+a valid updated_at is skipped. "@openclaw" must be a whole handle (MENTION,
+the same pattern the router uses). Each run first replays the router's failed-request
 journal (ops-failed.jsonl next to the queue) into the queue.
 
 Before the first agent run of a drain run, `openclaw health` checks that the
@@ -71,7 +73,7 @@ AGENT_TIMEOUT = 600          # passed to `openclaw agent --timeout`
 AGENT_KILL_AFTER = 660       # subprocess timeout, a bit above the agent's own
 TOKEN_TIMEOUT = 60
 HTTP_TIMEOUT = 30
-WINDOW = timedelta(minutes=15)   # comments created this long before received_at still count
+WINDOW = timedelta(minutes=15)   # comments written (comment_time) this long before received_at still count
 AFTER_RECEIVED = timedelta(minutes=2)   # and up to this long after it (clock skew, Slack delay)
 FAILED_JOURNAL = "ops-failed.jsonl"     # command requests the router could not publish
 REPLAYING = re.compile(r"^\.ops-failed\.replaying-[A-Za-z0-9_-]+\.jsonl$")
@@ -276,7 +278,7 @@ def utcnow():
 
 def load_state(path, dry_run, now=None):
     """The state, keyed by lower-case repository: "delivered" maps each "<source>:<id>" key sent to
-    the agent to {"time": the comment's created_at or submitted_at}, and "pending" maps the keys whose
+    the agent to {"time": the comment's updated_at (a review's submitted_at) when it was picked}, and "pending" maps the keys whose
     agent run started but was never recorded as finished to their start time and URL.
 
     Delivered keys older than DELIVERED_KEEP are dropped; the WINDOW check already excludes those
@@ -345,10 +347,10 @@ def clear_pending(state, repo, key):
         state["pending"].pop(repo, None)
 
 
-def mark_delivered(state, repo, source, cid, created):
+def mark_delivered(state, repo, source, cid, written):
     key = f"{source}:{cid}"
     clear_pending(state, repo, key)
-    state["delivered"].setdefault(repo, {})[key] = {"time": iso(created)}
+    state["delivered"].setdefault(repo, {})[key] = {"time": iso(written)}
 
 
 # ---------------------------------------------------------------- GitHub
@@ -463,9 +465,17 @@ class GitHub:
         return out
 
 
+def comment_time(source, c):
+    """The time a comment's current body was written: submitted_at for a review, updated_at for an issue or
+    review comment (equal to created_at when it was never edited). None when that field is missing or
+    invalid; created_at is never used instead, since an edit after the event could then run unseen."""
+    return parse_time(c.get("submitted_at" if source == REVIEW else "updated_at"))
+
+
 def select(comments, repo, window_start, window_end, state):
-    """Trusted @openclaw comments created in [window_start, window_end] and not yet delivered, oldest first.
-    comments holds (source, comment) pairs. Each item is (time, source, id, repo, number, html_url, body)."""
+    """Trusted @openclaw comments whose body was written (comment_time) in [window_start, window_end] and not
+    yet delivered, oldest first. comments holds (source, comment) pairs. Each item is
+    (time, source, id, repo, number, html_url, body)."""
     picked = {}
     for source, c in comments:
         user, cid, body = c.get("user"), c.get("id"), c.get("body")
@@ -475,8 +485,8 @@ def select(comments, repo, window_start, window_end, state):
             continue
         if not MENTION.search(body):
             continue
-        created = parse_time(c.get("submitted_at" if source == REVIEW else "created_at"))
-        if created is None or not window_start <= created <= window_end:
+        written = comment_time(source, c)
+        if written is None or not window_start <= written <= window_end:
             continue
         if source == ISSUE_COMMENT:
             m = ISSUE_URL_NUMBER.search(str(c.get("issue_url", "")))
@@ -487,7 +497,7 @@ def select(comments, repo, window_start, window_end, state):
             continue
         if already_handled(state, repo.lower(), source, cid):
             continue
-        picked[(source, cid)] = (created, source, cid, repo, int(m.group(1)), url, body)
+        picked[(source, cid)] = (written, source, cid, repo, int(m.group(1)), url, body)
     return sorted(picked.values(), key=lambda item: item[:3])
 
 
@@ -824,7 +834,7 @@ def drain(qdir, dry_run, gh, run, now):
             continue
         picked.sort(key=lambda item: item[:3])
         ok, why = True, ""
-        for created, source, cid, repo, number, url, body in picked:
+        for written, source, cid, repo, number, url, body in picked:
             key, rkey = f"{source}:{cid}", repo.lower()
             pending = state["pending"].get(rkey, {}).get(key)
             if pending is not None:
@@ -865,7 +875,7 @@ def drain(qdir, dry_run, gh, run, now):
                 send_alert(url, detail, run)
                 ok, why = False, "ops agent run failed or timed out"
                 break
-            mark_delivered(state, rkey, source, cid, created)
+            mark_delivered(state, rkey, source, cid, written)
             try:
                 write_json_atomic(state_path, state)
             except OSError as e:
