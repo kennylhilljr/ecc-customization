@@ -43,7 +43,7 @@ flowchart LR
 | [tests/](tests/) | `unittest` tests for the `ops` step, the settings merge, the token command and the command drain |
 | [lib/ecctools.py](lib/ecctools.py) | Python helpers for templates, snapshots, restores, plugin registration and secret scanning |
 | [kit/](kit/) | Agent instructions, build/review skills, lessons ledger and orchestration templates |
-| [skills/](skills/README.md) | Shared ECC operation, EARS notation and product requirements skills |
+| [skills/](skills/README.md) | Shared ECC operation and EARS notation skills |
 | [machine/](machine/README.md) | Snapshot destination (no captured manifest yet), plus the hand-maintained `machine/ops/` settings |
 | [.githooks/pre-commit](.githooks/pre-commit) | Scans staged file contents for secret-shaped strings |
 | [docs/REDEPLOY.md](docs/REDEPLOY.md) | Migration procedure, owner tasks and recovery notes |
