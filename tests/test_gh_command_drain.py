@@ -14,6 +14,7 @@ import time
 import unittest
 import re
 import urllib.parse
+import uuid
 from datetime import datetime, timedelta, timezone
 from unittest import mock
 
@@ -211,6 +212,28 @@ class DrainTest(unittest.TestCase):
 
     def listing(self, d):
         return sorted(os.listdir(d)) if os.path.isdir(d) else []
+
+    def snapshot(self):
+        """Every entry under the queue root and the state folder: type, mode, mtime and contents. Access
+        times are left out because reading a file may update them."""
+        out = {}
+        for top in (self.root, self.state_dir):
+            if not os.path.lexists(top):
+                out[top] = None
+                continue
+            for dirpath, dirnames, filenames in os.walk(top):
+                for n in sorted(dirnames + filenames):
+                    p = os.path.join(dirpath, n)
+                    st = os.lstat(p)
+                    if os.path.islink(p):
+                        data = ("link", os.readlink(p))
+                    elif os.path.isdir(p):
+                        data = ("dir",)
+                    else:
+                        with open(p, "rb") as fh:
+                            data = ("file", fh.read())
+                    out[p] = (data, st.st_mode, st.st_mtime_ns)
+        return out
 
     def load_state(self):
         with open(self.state) as fh:
@@ -893,6 +916,144 @@ class DrainTest(unittest.TestCase):
         self.assertEqual(self.listing(self.root), before)
         self.assertEqual(self.listing(self.queue), [])
 
+    # ---- replay of the router's ops-failed-<UUID>.json request files
+    def write_failed(self, text=None, uid=None):
+        name = f"ops-failed-{uid or uuid.uuid4()}.json"
+        with open(os.path.join(self.root, name), "w") as fh:
+            fh.write(self.journal_line() + "\n" if text is None else text)
+        return name
+
+    def failed_files(self):
+        return [n for n in self.listing(self.root) if n.startswith("ops-failed")]
+
+    def test_failed_request_files_published_and_bad_ones_rejected(self):
+        good1 = self.write_failed()
+        good2 = self.write_failed(self.journal_line(number=8, slack_message_id=None))
+        garbage = self.write_failed("not json")
+        wrong = self.write_failed(json.dumps({"kind": "command", "repo": "bad"}))
+        two = self.write_failed(self.journal_line() + "\n" + self.journal_line() + "\n")
+        target = os.path.join(self.tmp.name, "secret.json")
+        with open(target, "w") as fh:
+            fh.write(self.journal_line())
+        link = f"ops-failed-{uuid.uuid4()}.json"
+        os.symlink(target, os.path.join(self.root, link))
+        other = "ops-failed-not-a-uuid.json"
+        with open(os.path.join(self.root, other), "w") as fh:
+            fh.write(self.journal_line())
+        code, _ = self.run_drain(env={"FAKE_TOKEN_EXIT": "1"})  # so the published events stay visible
+        self.assertEqual(code, 1)
+        self.assertEqual(self.failed_files(), [other])  # a name the router never writes is left alone
+        names = self.listing(self.deferred)
+        self.assertEqual(len(names), 2)
+        events = []
+        for n in names:
+            self.assertTrue(re.match(r"^20261104T010203123Z-(1730643302_123456|nots)-command-[0-9a-f]{6}\.json$", n), n)
+            with open(os.path.join(self.deferred, n)) as fh:
+                events.append(json.load(fh)["number"])
+        self.assertEqual(sorted(events), [7, 8])
+        self.assertEqual(self.listing(self.rejected), sorted([garbage, wrong, two, link]))
+        with open(os.path.join(self.rejected, garbage)) as fh:
+            self.assertEqual(fh.read(), "not json")
+        self.assertTrue(os.path.islink(os.path.join(self.rejected, link)))
+        with open(target) as fh:
+            self.assertEqual(fh.read(), self.journal_line())
+        self.assertNotIn(good1, self.listing(self.rejected))
+        self.assertNotIn(good2, self.listing(self.rejected))
+        self.assertEqual(self.listing(os.path.join(self.root, ".tmp")), [])
+
+    def test_failed_request_file_is_drained(self):
+        self.write_failed()
+        code, _ = self.run_drain(routes={"/repos/octo/app/issues/7/comments": [comment(830)]})
+        self.assertEqual(code, 0, self.output)
+        self.assertEqual(self.delivered(), ["issue_comment:830"])
+        self.assertEqual(self.failed_files(), [])
+        self.assertEqual(self.listing(self.queue), [])
+
+    def test_failed_request_publish_failure_keeps_source(self):
+        name = self.write_failed()
+        with open(os.path.join(self.root, name)) as fh:
+            before = fh.read()
+        with mock.patch.object(drain, "publish_event", mock.Mock(side_effect=OSError(28, "No space left"))):
+            code, _ = self.run_drain(env={"FAKE_TOKEN_EXIT": "1"})
+        self.assertEqual(code, 1)
+        self.assertIn("could not publish", self.output)
+        self.assertEqual(self.failed_files(), [name])
+        with open(os.path.join(self.root, name)) as fh:
+            self.assertEqual(fh.read(), before)
+        self.assertEqual(self.listing(self.deferred), [])
+        code, _ = self.run_drain(env={"FAKE_TOKEN_EXIT": "1"})  # the retry publishes it
+        self.assertEqual(self.failed_files(), [])
+        self.assertEqual(len(self.listing(self.deferred)), 1)
+
+    def test_failed_request_unreadable_is_kept(self):
+        name = self.write_failed()
+        path = os.path.join(self.root, name)
+        os.chmod(path, 0)
+        try:
+            code, _ = self.run_drain(env={"FAKE_TOKEN_EXIT": "1"})
+        finally:
+            os.chmod(path, 0o600)
+        self.assertEqual(code, 1)
+        self.assertIn("could not read", self.output)
+        self.assertEqual(self.failed_files(), [name])
+        self.assertEqual(self.listing(self.rejected), [])
+        self.assertEqual(self.listing(self.deferred), [])
+
+    def test_failed_request_cleanup_failure_is_reported(self):
+        name = self.write_failed()
+        with mock.patch.object(drain, "remove_source", mock.Mock(side_effect=OSError(1, "Operation not permitted"))):
+            code, _ = self.run_drain(env={"FAKE_TOKEN_EXIT": "1"})
+        self.assertEqual(code, 1)
+        self.assertIn("could not remove", self.output)
+        self.assertEqual(self.failed_files(), [name])
+        self.assertEqual(len(self.listing(self.deferred)), 1)
+
+    def test_failed_request_quarantine_failure_is_reported(self):
+        name = self.write_failed("not json")
+        os.makedirs(self.rejected)
+        os.chmod(self.rejected, 0o500)
+        try:
+            code, _ = self.run_drain(env={"FAKE_TOKEN_EXIT": "1"})
+        finally:
+            os.chmod(self.rejected, 0o700)
+        self.assertEqual(code, 1)
+        self.assertIn("could not move", self.output)
+        self.assertEqual(self.failed_files(), [name])
+
+    def test_failed_request_dry_run_changes_nothing(self):
+        name = self.write_failed()
+        bad = self.write_failed("not json")
+        before = self.snapshot()
+        code, _ = self.run_drain("--dry-run")
+        self.assertEqual(code, 0, self.output)
+        self.assertIn(f"would replay {name}", self.output)
+        self.assertIn(f"would replay {bad}", self.output)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_request_written_during_replay_waits_for_next_run(self):
+        first = self.write_failed()
+        real, later = drain.publish_event, []
+
+        def router_writes(root, qdir, ev):
+            if not later:
+                later.append(self.write_failed(self.journal_line(number=9)))
+            return real(root, qdir, ev)
+        with mock.patch.object(drain, "publish_event", router_writes):
+            code, _ = self.run_drain(env={"FAKE_TOKEN_EXIT": "1"})
+        self.assertEqual(code, 1)
+        self.assertNotIn(first, self.failed_files())
+        self.assertEqual(self.failed_files(), later)
+        with open(os.path.join(self.root, later[0])) as fh:
+            self.assertEqual(json.loads(fh.read())["number"], 9)
+        self.assertEqual(len(self.listing(self.deferred)), 1)
+        self.run_drain(env={"FAKE_TOKEN_EXIT": "1"})
+        self.assertEqual(self.failed_files(), [])
+        numbers = []
+        for n in self.listing(self.deferred):
+            with open(os.path.join(self.deferred, n)) as fh:
+                numbers.append(json.load(fh)["number"])
+        self.assertEqual(sorted(numbers), [7, 9])
+
     # ---- dedupe by explicit keys only
     def test_deferred_lower_id_on_another_issue_still_delivered(self):
         """Codex review round 9: command comment 100 on issue A is deferred, then comment 105 on issue B
@@ -1031,29 +1192,108 @@ class DrainTest(unittest.TestCase):
         self.assertEqual(self.listing(self.deferred), ["new-command.json"])
         self.assertEqual(self.listing(self.queue), [])  # requeued, then handled in the same run
 
-    def test_dry_run_changes_nothing(self):
+    # ---- dry runs create and modify nothing, and take no lock
+    def dry_run_fixture(self, state=True):
+        """A queue with work in every place the drain reads: an event, an old deferred file, a rejected
+        entry, a stray file, a failed-request file, a legacy journal and its replaying leftover, and (with
+        state) a state file holding a pending entry."""
         os.makedirs(self.deferred)
+        os.makedirs(self.rejected)
         self.event()
         old = os.path.join(self.deferred, "old.json")
         with open(old, "w") as fh:
             fh.write("{}")
         os.utime(old, (time.time() - 7200, time.time() - 7200))
+        with open(os.path.join(self.rejected, "kept.json"), "w") as fh:
+            fh.write("{}")
         open(os.path.join(self.queue, "notes.txt"), "w").close()
-        os.makedirs(self.state_dir)
+        self.write_failed()
+        self.write_journal(self.journal_line())
+        self.write_journal(self.journal_line(), name=".ops-failed.replaying-20261104T000000Z.jsonl")
+        if state:
+            os.makedirs(self.state_dir)
+            with open(self.state, "w") as fh:
+                json.dump({"delivered": {}, "pending": {"octo/app": {"issue_comment:1": {
+                    "since": "2026-11-04T01:00:00Z", "url": "https://github.com/octo/app/issues/7#issuecomment-1"}}}}, fh)
+        return {"/repos/octo/app/issues/7/comments": [comment(180)]}
+
+    def assert_dry_run_unchanged(self, *args, routes=None, code=0, previews=("would wake the ops agent",)):
+        before = self.snapshot()
+        got, _ = self.run_drain("--dry-run", *args, routes=routes)
+        self.assertEqual(got, code, self.output)
+        for line in previews:
+            self.assertIn(line, self.output)
+        self.assertNotIn("holds the lock", self.output)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.agent_runs(), [])
+        self.assertEqual(self.health_checks(), [])
+        self.assertEqual(self.alerts(), [])
+
+    def test_dry_run_changes_nothing(self):
+        routes = self.dry_run_fixture()
         with open(self.state, "w") as fh:
             fh.write("not json")
-        before = {d: self.listing(d) for d in (self.queue, self.deferred, self.state_dir)}
-        routes = {"/repos/octo/app/issues/7/comments": [comment(180)]}
-        code, _ = self.run_drain("--dry-run", routes=routes)
-        self.assertEqual(code, 0, self.output)
-        self.assertIn("would wake the ops agent", self.output)
-        self.assertEqual(self.agent_runs(), [])
-        after = {d: self.listing(d) for d in (self.queue, self.deferred, self.state_dir)}
-        after[self.state_dir].remove("drain.lock")
-        self.assertEqual(before, after)
-        self.assertFalse(os.path.exists(self.rejected))
+        self.assert_dry_run_unchanged(routes=routes, previews=(
+            "would wake the ops agent", "would move to", "would replay", "malformed", "would move it to"))
+        self.assertFalse(os.path.exists(os.path.join(self.state_dir, "drain.lock")))
         with open(self.state) as fh:
             self.assertEqual(fh.read(), "not json")
+
+    def test_dry_run_without_state_dir_creates_none(self):
+        routes = self.dry_run_fixture(state=False)
+        self.assert_dry_run_unchanged(routes=routes)
+        self.assertFalse(os.path.lexists(self.state_dir))
+
+    def test_dry_run_leaves_existing_lock_file_alone(self):
+        routes = self.dry_run_fixture()
+        lock = os.path.join(self.state_dir, "drain.lock")
+        with open(lock, "wb") as fh:
+            fh.write(b"sentinel bytes\n")
+        os.chmod(lock, 0o640)
+        os.utime(lock, (time.time() - 600, time.time() - 600))
+        self.assert_dry_run_unchanged(routes=routes)
+        with open(lock, "rb") as fh:
+            self.assertEqual(fh.read(), b"sentinel bytes\n")
+
+    def test_dry_run_previews_while_lock_held(self):
+        routes = self.dry_run_fixture()
+        import fcntl
+        with open(os.path.join(self.state_dir, "drain.lock"), "a") as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.assert_dry_run_unchanged(routes=routes)
+            code, gh = self.run_drain(routes=routes)  # a normal run still yields to the holder
+            self.assertEqual(code, 0)
+            self.assertIn("another drain run holds the lock", self.output)
+            self.assertEqual(gh.calls, [])
+        self.assertEqual(self.agent_runs(), [])
+
+    def test_retry_pending_dry_run_writes_nothing(self):
+        routes = self.dry_run_fixture()
+        self.assert_dry_run_unchanged("--retry-pending", routes=routes, previews=(
+            "would clear the pending entry for https://github.com/octo/app/issues/7#issuecomment-1",
+            "would wake the ops agent"))
+        self.assertEqual(list(self.load_state()["pending"]["octo/app"]), ["issue_comment:1"])
+        self.assertFalse(os.path.exists(os.path.join(self.state_dir, "drain.lock")))
+
+    def test_dry_run_refused_queue_creates_no_state(self):
+        other = os.path.join(self.tmp.name, "elsewhere", "ops")
+        os.makedirs(other)
+        code, gh = self.run_drain("--dry-run", "--queue", other)
+        self.assertEqual(code, 2)
+        self.assertIn("refusing the queue", self.output)
+        self.assertEqual(gh.calls, [])
+        self.assertFalse(os.path.lexists(self.state_dir))
+        self.assertEqual(os.listdir(other), [])
+
+    def test_normal_run_takes_and_releases_lock(self):
+        self.event()
+        code, _ = self.run_drain(routes={"/repos/octo/app/issues/7/comments": []})
+        self.assertEqual(code, 0, self.output)
+        lock = os.path.join(self.state_dir, "drain.lock")
+        self.assertTrue(os.path.isfile(lock))
+        import fcntl
+        with open(lock, "a") as fh:  # released: another process can take it at once
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
     def test_corrupt_state_quarantined(self):
         self.event()

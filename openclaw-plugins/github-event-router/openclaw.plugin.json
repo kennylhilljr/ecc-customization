@@ -25,10 +25,10 @@
         "type": "array",
         "items": {
           "type": "string",
-          "pattern": "^[UW][A-Z0-9]{6,}$"
+          "pattern": "^\\s*(?:[Ss][Ll][Aa][Cc][Kk]:)?(?:[Uu][Ss][Ee][Rr]:)?[UW][A-Z0-9]{6,}\\s*$"
         },
         "maxItems": 16,
-        "description": "Slack user ids whose messages get the normal agent turn. Defaults to channels.slack.allowFrom."
+        "description": "Slack user ids whose messages get the normal agent turn, each optionally prefixed with slack:, user: or slack:user: (any case). Each id at most once. When set, even to an empty list, it replaces channels.slack.allowFrom."
       },
       "botSenderIds": {
         "type": "array",

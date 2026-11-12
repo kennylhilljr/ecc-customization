@@ -16,18 +16,19 @@
 // No runtime dependencies and no SDK import: the default export is the plain
 // object definePluginEntry() returns, as in the ecc-orchestrator plugin.
 
+import path from "node:path";
+
 import {
-  appendCommandJournal,
   buildCommand,
   buildRecord,
   buildSweep,
-  COMMAND_JOURNAL,
   recordUnparsed,
   writeCommand,
   writeEvent,
+  writeFailedCommand,
   writeSweep,
 } from "./src/queue.js";
-import { ConfigError, DEFAULT_CHANNEL_ID, decide, isFeedChannel, ownerIdsFrom, parseConfig, senderOf } from "./src/router.js";
+import { ConfigError, DEFAULT_CHANNEL_ID, decide, isFeedChannel, parseConfig, resolveOwnerIds, senderOf } from "./src/router.js";
 
 export const PLUGIN_ID = "github-event-router";
 
@@ -59,7 +60,7 @@ export function createHandler(
     write = writeEvent,
     sweep = writeSweep,
     command = writeCommand,
-    journal = appendCommandJournal,
+    failed = writeFailedCommand,
     unparsed = recordUnparsed,
     now = () => new Date(),
     senderLog,
@@ -128,12 +129,12 @@ export function createHandler(
         const file = await command(cfg.queueRoot, record);
         logger?.info?.(`${PLUGIN_ID}: queued @openclaw command check for ${record.repo ?? "all repos"}${record.number ? `#${record.number}` : ""} -> ${file}`);
       } catch (err) {
-        // Keep the request: the drain replays this journal into ops/.
+        // Keep the request: the drain publishes each ops-failed-<UUID>.json into ops/.
         try {
-          await journal(cfg.queueRoot, record);
-          logger?.error?.(`${PLUGIN_ID}: could not write command request (${errText(err)}); saved it to ${COMMAND_JOURNAL} for the drain to replay`);
+          const saved = await failed(cfg.queueRoot, record);
+          logger?.error?.(`${PLUGIN_ID}: could not write command request (${errText(err)}); saved it to ${path.basename(String(saved))} for the drain to replay`);
         } catch (err2) {
-          logger?.error?.(`${PLUGIN_ID}: could not write command request (${errText(err)}) or save it to ${COMMAND_JOURNAL} (${errText(err2)}); it is lost`);
+          logger?.error?.(`${PLUGIN_ID}: could not write command request (${errText(err)}) or save it as a failed-request file (${errText(err2)}); it is lost`);
         }
       }
     }
@@ -143,13 +144,17 @@ export function createHandler(
 
 /**
  * Used when the plugin config is invalid. Fails closed: every message in the
- * feed channel is dropped except an owner's, and nothing is queued.
+ * feed channel is dropped except an owner's (ownerSenderIds when set, else
+ * channels.slack.allowFrom), and nothing is queued.
  */
 export function createFailClosedHandler(raw, openclawConfig) {
   const channelId = typeof raw?.channelId === "string" && /^[CG][A-Z0-9]{6,}$/.test(raw.channelId) ? raw.channelId : DEFAULT_CHANNEL_ID;
+  // Owners are resolved on their own, so an unrelated bad setting does not
+  // drop an explicit ownerSenderIds. If ownerSenderIds itself is invalid,
+  // nobody is exempt.
   let owners = [];
   try {
-    owners = ownerIdsFrom(openclawConfig?.channels?.slack?.allowFrom);
+    owners = resolveOwnerIds(raw, openclawConfig);
   } catch {
     owners = [];
   }
