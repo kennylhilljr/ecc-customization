@@ -872,6 +872,7 @@ PLAN_OPTIONAL_COLUMNS = ["Provides", "Requires"]
 PLAN_TOP = ("src/", "tests/", "tools/", "docs/", ".github/")
 PLAN_RISK_TIERS = {"low": 0, "medium": 1, "high": 2}
 PLAN_PLACEHOLDERS = {"uid", "plan", "implemented", "note", "criteria", "prds", "rules"}
+PLAN_CLAR_ITEM = re.compile(r"^\s*[-*]\s+(?:\*\*|`)?([A-Za-z][A-Za-z0-9 ._-]*?)(?:\*\*|`)?\s*:")
 PLAN_NOTE = " {plan} section 2.2 lists clarifications for this unit; they are requirements."
 PLAN_DEFAULTS = {
     "package_path": "",
@@ -980,11 +981,24 @@ def load_plan_config(path):
     bad = sorted(set(ud) - {"capabilities", "budget", "rollback"})
     if bad:
         raise PlanJsonError(f"{where}: unknown keys in 'unit_defaults': {bad}")
-    merged = dict(PLAN_DEFAULTS["unit_defaults"])
-    merged.update(ud)
+    merged = json.loads(json.dumps(PLAN_DEFAULTS["unit_defaults"]))
     for key in ("capabilities", "budget"):
-        if not isinstance(merged[key], dict):
-            raise PlanJsonError(f"{where}: 'unit_defaults.{key}' must be an object")
+        if key in ud:
+            if not isinstance(ud[key], dict):
+                raise PlanJsonError(f"{where}: 'unit_defaults.{key}' must be an object")
+            merged[key].update(ud[key])
+    if "rollback" in ud:
+        merged["rollback"] = ud["rollback"]
+    caps, budget = merged["capabilities"], merged["budget"]
+    if not isinstance(caps.get("network"), bool):
+        raise PlanJsonError(f"{where}: 'unit_defaults.capabilities.network' must be true or false")
+    _str_list(caps.get("secrets"), "unit_defaults.capabilities.secrets", where)
+    for key in ("attempts", "minutes"):
+        if not isinstance(budget.get(key), int) or isinstance(budget.get(key), bool) or budget[key] < 1:
+            raise PlanJsonError(f"{where}: 'unit_defaults.budget.{key}' must be a positive integer")
+    cost = budget.get("maximum_cost_usd")
+    if not isinstance(cost, (int, float)) or isinstance(cost, bool) or cost <= 0:
+        raise PlanJsonError(f"{where}: 'unit_defaults.budget.maximum_cost_usd' must be a positive number")
     if not isinstance(merged["rollback"], str):
         raise PlanJsonError(f"{where}: 'unit_defaults.rollback' must be a string")
     cfg["unit_defaults"] = merged
@@ -1189,10 +1203,14 @@ def parse_plan(text, cfg, milestone=None, where="plan"):
     clar = _section(text, r"^### 2\.2(\s|$)", where, required=False)
     targets = []
     if clar:
-        c_header, c_rows = _table(clar, where)
+        _, c_rows = _table(clar, where)
         for _, cells in c_rows:
             if cells:
-                targets.append(cells[0].strip())
+                targets.append(cells[0].strip().strip("`*").strip())
+        for _, line in clar:
+            m = PLAN_CLAR_ITEM.match(line)
+            if m:
+                targets.append(m.group(1).strip())
     return selected, targets
 
 
@@ -1238,8 +1256,8 @@ def build_units(text, cfg, root, plan_rel, milestone=None, where="plan"):
         clarified = any(t == uid or t.lower() == "every unit" or (t.lower() == "every adapter unit" and is_adapter)
                         for t in targets)
         criteria = row["Criteria"].strip()
-        prds = list(dict.fromkeys(_resolve_prd(i.split("-")[0], cfg, root, at)
-                                  for i in criteria.split(", ") if i))
+        prds = list(dict.fromkeys(_resolve_prd(i.strip().split("-")[0], cfg, root, at)
+                                  for i in criteria.split(",") if i.strip()))
         values = {
             "uid": uid, "plan": plan_rel, "implemented": row["Implements"].replace("`", ""),
             "note": PLAN_NOTE.format(plan=plan_rel) if clarified else "",

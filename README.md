@@ -260,7 +260,7 @@ What the generator reads:
 - The milestone is the task id prefix (`M1` in `M1-04`). `--milestone` picks one; without it the table must have exactly one prefix. Rows with status `done` are left out, and dependencies on `done` rows of any milestone are removed.
 - Scope paths are the backticked entries of `Files (scope)`. They are placed under `package_path` unless they start with `src/`, `tests/`, `tools/`, `docs/` or `.github/` or are listed in `root_files`. A trailing `/` is kept (a folder scope). `dir/*` expands to every name in `fixture_names`, with `{ext}` taken from `fixture_extensions` for that expanded folder (default `json`).
 - `Provides` and `Requires` become arrays: comma-separated, surrounding backticks removed, blank or `none` for an empty array. Without the columns the units have neither field.
-- A row of the `### 2.2` table whose first cell is the unit id, `every unit`, or `every adapter unit` (for a unit whose scope holds an adapter module) adds the sentence "PLAN section 2.2 lists clarifications for this unit; they are requirements." to the unit's description.
+- A row of the `### 2.2` table whose first cell (or a list item in that section whose text before the first `:`) is the unit id, `every unit`, or `every adapter unit` (for a unit whose scope holds an adapter module) adds the sentence "PLAN section 2.2 lists clarifications for this unit; they are requirements." to the unit's description.
 
 What it writes for each unit: the description from `description_template`; acceptance commands in this order: `test_command` with the unit's `tests/**/test_*.py` scope files (or the unit's entry in `acceptance_overrides` instead), then `conformance_command` when the scope holds adapter modules, then `gate_command`; the routing tier from the risk (`low` 0, `medium` 1, `high` 2; any other risk is an error); and `capabilities`, `budget` and `rollback` from `unit_defaults`. The JSON uses one-space indentation and ends with a newline.
 
@@ -280,9 +280,9 @@ The settings file `.orchestration/plan-json.json` is found by searching upward f
 | `description_template` | Unit description; placeholders `{uid}`, `{plan}`, `{implemented}`, `{note}`, `{criteria}`, `{prds}`, `{rules}` (write `{{` and `}}` for literal braces) | a short generic prompt |
 | `test_command` | Test command; `{tests}` is the space-separated test files | `uv run pytest {tests} -q` |
 | `conformance_command` | Conformance command for adapter units; `{expression}` is the adapter ids joined with ` or ` in double quotes, for example `"arxiv or crossref"`, so the orchestrator passes it as one argument | `null` (none) |
-| `gate_command` | Last acceptance command | `tools/ci.sh` |
+| `gate_command` | Last acceptance command; research-mcp sets `tools/ci.sh --python-only` | `tools/ci.sh` (the kit's default gate) |
 | `acceptance_overrides` | Unit id to the commands that replace its test command | `{}` |
-| `unit_defaults` | `capabilities`, `budget` and `rollback` of every unit | network off, no secrets, 2 attempts, 30 minutes, 5 USD, `Revert the commit.` |
+| `unit_defaults` | `capabilities`, `budget` and `rollback` of every unit; keys left out of `capabilities` or `budget` keep their defaults | network off, no secrets, 2 attempts, 30 minutes, 5 USD, `Revert the commit.` |
 
 [`tests/fixtures/plan_json/research-mcp.config.json`](tests/fixtures/plan_json/research-mcp.config.json) is research-mcp's `tools/gen_m0_plan.py` (at `5235c26`) expressed as settings; the tests check that it reproduces that commit's `.orchestration/plan-m0.json` (18 units) and the empty plan of `27baf2d`. The only difference is the deliberate quoting of the conformance `-k` expression. To adopt the command, research-mcp copies that file to `.orchestration/plan-json.json`, replaces its generator call in `tools/ci.sh` with `ecc-kit plan-json --check docs/build/M1-plan-v6.md .orchestration/plan-m1.json --milestone M1` (and the same for M0), and deletes `tools/gen_m0_plan.py`. This repository does not change research-mcp.
 

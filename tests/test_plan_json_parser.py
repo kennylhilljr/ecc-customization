@@ -82,6 +82,10 @@ class Config(unittest.TestCase):
             ({"acceptance_overrides": {"M0-01": "uv sync"}}, "acceptance_overrides.M0-01"),
             ({"unit_defaults": {"budget": 3}}, "unit_defaults.budget"),
             ({"unit_defaults": {"other": 3}}, "unknown keys in 'unit_defaults'"),
+            ({"unit_defaults": {"budget": {"attempts": 0}}}, "budget.attempts"),
+            ({"unit_defaults": {"budget": {"maximum_cost_usd": "5"}}}, "maximum_cost_usd"),
+            ({"unit_defaults": {"capabilities": {"network": "yes"}}}, "capabilities.network"),
+            ({"unit_defaults": {"capabilities": {"secrets": "A"}}}, "capabilities.secrets"),
             ({"description_template": "{uid} {oops}"}, r"unknown placeholders \['oops'\]"),
             ({"description_template": "{uid"}, "bad template"),
             ({"test_command": "pytest {files}"}, "'test_command' has unknown"),
@@ -94,6 +98,13 @@ class Config(unittest.TestCase):
                 with self.assertRaisesRegex(PlanJsonError, msg) as ctx:
                     ecctools.load_plan_config(self.path)
                 self.assertIn(self.path, str(ctx.exception))
+
+    def test_partial_unit_defaults_keep_nested_defaults(self):
+        self.write({"unit_defaults": {"budget": {"attempts": 4}, "capabilities": {"network": True}}})
+        ud = ecctools.load_plan_config(self.path)["unit_defaults"]
+        self.assertEqual(ud["budget"], {"attempts": 4, "minutes": 30, "maximum_cost_usd": 5})
+        self.assertEqual(ud["capabilities"], {"network": True, "secrets": []})
+        self.assertEqual(ud["rollback"], "Revert the commit.")
 
     def test_research_mcp_config(self):
         cfg = ecctools.load_plan_config(os.path.join(FIX, "research-mcp.config.json"))
@@ -179,6 +190,12 @@ class Tables(unittest.TestCase):
         _, targets = self.parse(plan(row("M0-01"), clar=clar))
         self.assertEqual(targets, ["M0-02", "every adapter unit"])
 
+    def test_clarification_list_item_prefixes(self):
+        clar = ("### 2.2 Clarifications\n\n- M0-03: must hold for every unit.\n"
+                "- **every unit**: y\n* `M0-04`: z\n  continued text: not a target\n")
+        _, targets = self.parse(plan(row("M0-01"), clar=clar))
+        self.assertEqual(targets, ["M0-03", "every unit", "M0-04"])
+
 
 class Scope(unittest.TestCase):
     def cfg(self):
@@ -231,6 +248,13 @@ class Prds(unittest.TestCase):
 
 
 class Units(unittest.TestCase):
+    def test_criteria_split_on_commas_without_spaces(self):
+        cfg = config(criterion_prds={"REQ": "docs/req.md", "SEC": "docs/sec.md"},
+                     description_template="{criteria}|{prds}")
+        units = ecctools.build_units(plan(row("M0-01", criteria="REQ-1,SEC-2, REQ-3")), cfg,
+                                     "/x", "p.md", None, "p.md")
+        self.assertEqual(units[0]["description"], "REQ-1,SEC-2, REQ-3|docs/req.md, docs/sec.md")
+
     def test_unknown_risk_is_an_error(self):
         cfg = config(criterion_prds={"REQ": "docs/prd.md"})
         with self.assertRaisesRegex(PlanJsonError, r"p.md:\d+: risk 'severe'"):

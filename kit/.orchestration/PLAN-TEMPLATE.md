@@ -44,7 +44,7 @@ How `ecc-kit plan-json` reads the columns:
 
 ### 2.2 Clarifications
 
-The first column names the units a row applies to: a unit id, `every unit`, or `every adapter unit` (units whose scope holds a module in `adapter_folder`). Each matching unit's prompt says that this section lists requirements for it.
+The first column (or, for a list item, the text before its first `:`) names the units a row applies to: a unit id, `every unit`, or `every adapter unit` (units whose scope holds a module in `adapter_folder`). Each matching unit's prompt says that this section lists requirements for it.
 
 | Unit | Source | Requirement |
 | --- | --- | --- |
