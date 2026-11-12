@@ -1,0 +1,24 @@
+{
+  "$comment": "Settings for 'ecc-kit plan-json'. Edit package_path, the adapter keys and criterion_prds for this project; README.md in ecc-customization describes every key.",
+  "package_path": "src/my_package/",
+  "root_files": ["pyproject.toml", "uv.lock", ".python-version"],
+  "adapter_folder": null,
+  "adapter_exclude": [],
+  "adapter_ids": {},
+  "fixture_names": [],
+  "fixture_extensions": {},
+  "criterion_prds": {
+    "REQ": "{{PRD}}"
+  },
+  "rules": "Branch rules (AGENTS.md): work only on the branch you are on and commit there; never push, never create or switch branches, never commit to main.",
+  "description_template": "Read AGENTS.md first. Build work unit {uid} exactly as {plan} specifies: its task row and the designs it implements: {implemented}.{note} Write a test for each acceptance criterion this unit owns: {criteria} (their text is in {prds}). {rules}",
+  "test_command": "uv run pytest {tests} -q",
+  "conformance_command": null,
+  "gate_command": "tools/ci.sh",
+  "acceptance_overrides": {},
+  "unit_defaults": {
+    "capabilities": {"network": false, "secrets": []},
+    "budget": {"attempts": 2, "minutes": 30, "maximum_cost_usd": 5},
+    "rollback": "Revert the commit."
+  }
+}

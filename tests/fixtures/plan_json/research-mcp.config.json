@@ -1,0 +1,58 @@
+{
+  "$comment": "research-mcp's settings for ecc-kit plan-json, ported from tools/gen_m0_plan.py at 5235c26. Copy to .orchestration/plan-json.json.",
+  "package_path": "src/research_mcp/",
+  "root_files": [
+    "pyproject.toml",
+    "uv.lock",
+    ".python-version"
+  ],
+  "adapter_folder": "src/research_mcp/sources",
+  "adapter_exclude": [
+    "base",
+    "registry"
+  ],
+  "adapter_ids": {},
+  "fixture_names": [
+    "search_ok.{ext}",
+    "search_empty.{ext}",
+    "get_ok.{ext}",
+    "err_429.json",
+    "err_5xx.json",
+    "malformed.{ext}",
+    "oversize.marker"
+  ],
+  "fixture_extensions": {
+    "tests/sources/arxiv/fixtures": "xml"
+  },
+  "criterion_prds": {
+    "PLAT": "docs/prd/components/PRD-platform-v*.md",
+    "SRC": "docs/prd/components/PRD-sources-v*.md",
+    "SRCH": "docs/prd/components/PRD-search-v*.md",
+    "CACHE": "docs/prd/components/PRD-cache-v*.md",
+    "HLTH": "docs/prd/components/PRD-health-v*.md",
+    "SEC": "docs/prd/components/PRD-security-v*.md"
+  },
+  "rules": "Branch rules (AGENTS.md): work only on the branch you are on and commit there; never push, never create or switch branches, never commit to main. ECC merges main into your branch before each attempt; if it did, keep both sides and make your unit pass on top. If a file your unit needs belongs to a dependency that is not merged yet, do not create it: finish what you can and report status blocked naming the missing unit; ECC re-runs you after it merges. Do not add __init__.py files under tests/ and do not edit pyproject.toml, uv.lock or any package __init__.py (M0-01 owns them). Never touch the v1 repository (my-research-mcp-server) or ~/arxiv-papers, never read real credentials or the Keychain, and use fakes and recorded fixtures for every external system; tests pass with the network blocked. A prior attempt exists read-only at ~/Documents/GitHub/my-research-mcp; you may read it, but the LLDs win wherever they differ, and the plan's clarifications list defects that attempt shipped.",
+  "description_template": "Read AGENTS.md first. Build work unit {uid} exactly as {plan} specifies: its task row and the low level designs it implements: {implemented}.{note} The LLDs own every name. Write a test for each acceptance criterion this unit owns: {criteria} (their text is in {prds} section 2.4); start each test's docstring with `@spec <ID>:` and put a `# @spec <ID>` comment on the behavior's entry point in code. Keep tools/ci.sh --python-only green, including `node tools/sdd/cli.mjs check`; gates run commands without a shell, so tools/ci.sh stays executable with a #!/usr/bin/env bash line. {rules}",
+  "test_command": "uv run pytest {tests} -q",
+  "conformance_command": "uv run pytest tests/sources/test_conformance.py -k {expression} -q",
+  "gate_command": "tools/ci.sh --python-only",
+  "acceptance_overrides": {
+    "M0-01": [
+      "uv sync --frozen",
+      "uv run pytest tests/unit -q"
+    ]
+  },
+  "unit_defaults": {
+    "capabilities": {
+      "network": true,
+      "secrets": []
+    },
+    "budget": {
+      "attempts": 4,
+      "minutes": 240,
+      "maximum_cost_usd": 10.0
+    },
+    "rollback": "revert the unit branch; nothing outside this repository changes"
+  }
+}

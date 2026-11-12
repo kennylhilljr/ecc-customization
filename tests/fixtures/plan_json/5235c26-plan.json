@@ -1,0 +1,741 @@
+{
+ "units": [
+  {
+   "schema_version": "1.0",
+   "id": "M0-06",
+   "title": "Redaction and structured logging",
+   "description": "Read AGENTS.md first. Build work unit M0-06 exactly as docs/build/M0-plan-v4.md specifies: its task row and the low level designs it implements: docs/lld/LLD-platform-v2.md (\u00a74.3, \u00a75.10, \u00a78); docs/lld/LLD-security-v2.md (\u00a75.4); SPEC-v5 9, 10, 12. The LLDs own every name. Write a test for each acceptance criterion this unit owns: SEC-5, SEC-6, SEC-14, SEC-7, PLAT-40, PLAT-41, PLAT-42 (their text is in docs/prd/components/PRD-security-v3.md, docs/prd/components/PRD-platform-v4.md section 2.4); start each test's docstring with `@spec <ID>:` and put a `# @spec <ID>` comment on the behavior's entry point in code. Keep tools/ci.sh --python-only green, including `node tools/sdd/cli.mjs check`; gates run commands without a shell, so tools/ci.sh stays executable with a #!/usr/bin/env bash line. Branch rules (AGENTS.md): work only on the branch you are on and commit there; never push, never create or switch branches, never commit to main. ECC merges main into your branch before each attempt; if it did, keep both sides and make your unit pass on top. If a file your unit needs belongs to a dependency that is not merged yet, do not create it: finish what you can and report status blocked naming the missing unit; ECC re-runs you after it merges. Do not add __init__.py files under tests/ and do not edit pyproject.toml, uv.lock or any package __init__.py (M0-01 owns them). Never touch the v1 repository (my-research-mcp-server) or ~/arxiv-papers, never read real credentials or the Keychain, and use fakes and recorded fixtures for every external system; tests pass with the network blocked. A prior attempt exists read-only at ~/Documents/GitHub/my-research-mcp; you may read it, but the LLDs win wherever they differ, and the plan's clarifications list defects that attempt shipped.",
+   "depends_on": [
+    "M0-19",
+    "M0-20"
+   ],
+   "scope": {
+    "files": [
+     "src/research_mcp/platform/redact.py",
+     "src/research_mcp/platform/logging.py",
+     "tests/unit/platform/test_redact.py",
+     "tests/unit/platform/test_logging.py",
+     "tests/security/test_no_secret_in_logs.py"
+    ]
+   },
+   "acceptance": {
+    "commands": [
+     "uv run pytest tests/unit/platform/test_redact.py tests/unit/platform/test_logging.py tests/security/test_no_secret_in_logs.py -q",
+     "tools/ci.sh --python-only"
+    ]
+   },
+   "risk": "high",
+   "capabilities": {
+    "network": true,
+    "secrets": []
+   },
+   "routing": {
+    "initial_tier": 2,
+    "maximum_tier": 2,
+    "reviewer_must_differ_from_author": true
+   },
+   "budget": {
+    "attempts": 4,
+    "minutes": 240,
+    "maximum_cost_usd": 10.0
+   },
+   "rollback": "revert the unit branch; nothing outside this repository changes"
+  },
+  {
+   "schema_version": "1.0",
+   "id": "M0-07",
+   "title": "Async HTTP client, rate limits and downloader",
+   "description": "Read AGENTS.md first. Build work unit M0-07 exactly as docs/build/M0-plan-v4.md specifies: its task row and the low level designs it implements: docs/lld/LLD-platform-v2.md (\u00a74.4, \u00a75.3, \u00a75.4, \u00a76.1); docs/lld/LLD-cache-v2.md (\u00a75.13); docs/lld/LLD-security-v2.md (\u00a74.3); SPEC-v5 3, 6, 9. The LLDs own every name. Write a test for each acceptance criterion this unit owns: PLAT-35, PLAT-36, PLAT-37, PLAT-38, PLAT-39, PLAT-11, SEC-8, SEC-9, SEC-10, CACHE-1, CACHE-2 (their text is in docs/prd/components/PRD-platform-v4.md, docs/prd/components/PRD-security-v3.md, docs/prd/components/PRD-cache-v4.md section 2.4); start each test's docstring with `@spec <ID>:` and put a `# @spec <ID>` comment on the behavior's entry point in code. Keep tools/ci.sh --python-only green, including `node tools/sdd/cli.mjs check`; gates run commands without a shell, so tools/ci.sh stays executable with a #!/usr/bin/env bash line. Branch rules (AGENTS.md): work only on the branch you are on and commit there; never push, never create or switch branches, never commit to main. ECC merges main into your branch before each attempt; if it did, keep both sides and make your unit pass on top. If a file your unit needs belongs to a dependency that is not merged yet, do not create it: finish what you can and report status blocked naming the missing unit; ECC re-runs you after it merges. Do not add __init__.py files under tests/ and do not edit pyproject.toml, uv.lock or any package __init__.py (M0-01 owns them). Never touch the v1 repository (my-research-mcp-server) or ~/arxiv-papers, never read real credentials or the Keychain, and use fakes and recorded fixtures for every external system; tests pass with the network blocked. A prior attempt exists read-only at ~/Documents/GitHub/my-research-mcp; you may read it, but the LLDs win wherever they differ, and the plan's clarifications list defects that attempt shipped.",
+   "depends_on": [
+    "M0-06",
+    "M0-19"
+   ],
+   "scope": {
+    "files": [
+     "src/research_mcp/platform/http.py",
+     "src/research_mcp/platform/download.py",
+     "src/research_mcp/platform/ratelimit.py",
+     "tests/unit/platform/test_http.py",
+     "tests/unit/platform/test_ratelimit.py",
+     "tests/unit/platform/test_downloader.py",
+     "tests/security/test_scoped_credentials.py"
+    ]
+   },
+   "acceptance": {
+    "commands": [
+     "uv run pytest tests/unit/platform/test_http.py tests/unit/platform/test_ratelimit.py tests/unit/platform/test_downloader.py tests/security/test_scoped_credentials.py -q",
+     "tools/ci.sh --python-only"
+    ]
+   },
+   "risk": "high",
+   "capabilities": {
+    "network": true,
+    "secrets": []
+   },
+   "routing": {
+    "initial_tier": 2,
+    "maximum_tier": 2,
+    "reviewer_must_differ_from_author": true
+   },
+   "budget": {
+    "attempts": 4,
+    "minutes": 240,
+    "maximum_cost_usd": 10.0
+   },
+   "rollback": "revert the unit branch; nothing outside this repository changes"
+  },
+  {
+   "schema_version": "1.0",
+   "id": "M0-08",
+   "title": "Stores and migrations",
+   "description": "Read AGENTS.md first. Build work unit M0-08 exactly as docs/build/M0-plan-v4.md specifies: its task row and the low level designs it implements: docs/lld/LLD-platform-v2.md (\u00a73.1); docs/lld/LLD-cache-v2.md (\u00a73.1, \u00a73.3, \u00a73.4); docs/lld/LLD-health-v2.md (\u00a73); SPEC-v5 10. The LLDs own every name. Write a test for each acceptance criterion this unit owns: PLAT-50, PLAT-51, PLAT-52, PLAT-53 (their text is in docs/prd/components/PRD-platform-v4.md section 2.4); start each test's docstring with `@spec <ID>:` and put a `# @spec <ID>` comment on the behavior's entry point in code. Keep tools/ci.sh --python-only green, including `node tools/sdd/cli.mjs check`; gates run commands without a shell, so tools/ci.sh stays executable with a #!/usr/bin/env bash line. Branch rules (AGENTS.md): work only on the branch you are on and commit there; never push, never create or switch branches, never commit to main. ECC merges main into your branch before each attempt; if it did, keep both sides and make your unit pass on top. If a file your unit needs belongs to a dependency that is not merged yet, do not create it: finish what you can and report status blocked naming the missing unit; ECC re-runs you after it merges. Do not add __init__.py files under tests/ and do not edit pyproject.toml, uv.lock or any package __init__.py (M0-01 owns them). Never touch the v1 repository (my-research-mcp-server) or ~/arxiv-papers, never read real credentials or the Keychain, and use fakes and recorded fixtures for every external system; tests pass with the network blocked. A prior attempt exists read-only at ~/Documents/GitHub/my-research-mcp; you may read it, but the LLDs win wherever they differ, and the plan's clarifications list defects that attempt shipped.",
+   "depends_on": [],
+   "scope": {
+    "files": [
+     "src/research_mcp/platform/stores.py",
+     "src/research_mcp/platform/migrations/state/0001_init.sql",
+     "src/research_mcp/platform/migrations/cache/0001_init.sql",
+     "tests/unit/platform/test_stores.py"
+    ]
+   },
+   "acceptance": {
+    "commands": [
+     "uv run pytest tests/unit/platform/test_stores.py -q",
+     "tools/ci.sh --python-only"
+    ]
+   },
+   "risk": "high",
+   "capabilities": {
+    "network": true,
+    "secrets": []
+   },
+   "routing": {
+    "initial_tier": 2,
+    "maximum_tier": 2,
+    "reviewer_must_differ_from_author": true
+   },
+   "budget": {
+    "attempts": 4,
+    "minutes": 240,
+    "maximum_cost_usd": 10.0
+   },
+   "rollback": "revert the unit branch; nothing outside this repository changes"
+  },
+  {
+   "schema_version": "1.0",
+   "id": "M0-09",
+   "title": "Source contract, registry and conformance suite",
+   "description": "Read AGENTS.md first. Build work unit M0-09 exactly as docs/build/M0-plan-v4.md specifies: its task row and the low level designs it implements: docs/lld/LLD-sources-v2.md (\u00a72.1, \u00a72.3, \u00a75.1, \u00a75.2, \u00a75.3; SPEC-v5 4). docs/build/M0-plan-v4.md section 2.2 lists clarifications for this unit; they are requirements. The LLDs own every name. Write a test for each acceptance criterion this unit owns: SRC-1, SRC-2, SRC-3, SRC-4, SRC-5, SRC-6, SRC-7 (their text is in docs/prd/components/PRD-sources-v5.md section 2.4); start each test's docstring with `@spec <ID>:` and put a `# @spec <ID>` comment on the behavior's entry point in code. Keep tools/ci.sh --python-only green, including `node tools/sdd/cli.mjs check`; gates run commands without a shell, so tools/ci.sh stays executable with a #!/usr/bin/env bash line. Branch rules (AGENTS.md): work only on the branch you are on and commit there; never push, never create or switch branches, never commit to main. ECC merges main into your branch before each attempt; if it did, keep both sides and make your unit pass on top. If a file your unit needs belongs to a dependency that is not merged yet, do not create it: finish what you can and report status blocked naming the missing unit; ECC re-runs you after it merges. Do not add __init__.py files under tests/ and do not edit pyproject.toml, uv.lock or any package __init__.py (M0-01 owns them). Never touch the v1 repository (my-research-mcp-server) or ~/arxiv-papers, never read real credentials or the Keychain, and use fakes and recorded fixtures for every external system; tests pass with the network blocked. A prior attempt exists read-only at ~/Documents/GitHub/my-research-mcp; you may read it, but the LLDs win wherever they differ, and the plan's clarifications list defects that attempt shipped.",
+   "depends_on": [
+    "M0-07",
+    "M0-17",
+    "M0-18"
+   ],
+   "scope": {
+    "files": [
+     "src/research_mcp/sources/base.py",
+     "src/research_mcp/sources/registry.py",
+     "src/research_mcp/testing/adapters.py",
+     "tests/sources/conftest.py",
+     "tests/sources/test_conformance.py",
+     "tests/unit/sources/test_registry.py",
+     "tests/unit/sources/test_adapter_imports.py"
+    ]
+   },
+   "acceptance": {
+    "commands": [
+     "uv run pytest tests/sources/test_conformance.py tests/unit/sources/test_registry.py tests/unit/sources/test_adapter_imports.py -q",
+     "tools/ci.sh --python-only"
+    ]
+   },
+   "risk": "high",
+   "capabilities": {
+    "network": true,
+    "secrets": []
+   },
+   "routing": {
+    "initial_tier": 2,
+    "maximum_tier": 2,
+    "reviewer_must_differ_from_author": true
+   },
+   "budget": {
+    "attempts": 4,
+    "minutes": 240,
+    "maximum_cost_usd": 10.0
+   },
+   "rollback": "revert the unit branch; nothing outside this repository changes"
+  },
+  {
+   "schema_version": "1.0",
+   "id": "M0-10",
+   "title": "arXiv adapter",
+   "description": "Read AGENTS.md first. Build work unit M0-10 exactly as docs/build/M0-plan-v4.md specifies: its task row and the low level designs it implements: docs/lld/LLD-sources-v2.md (\u00a73.4, \u00a75.1, \u00a75.3; SPEC-v5 4). The LLDs own every name. Write a test for each acceptance criterion this unit owns: SRC-10 (their text is in docs/prd/components/PRD-sources-v5.md section 2.4); start each test's docstring with `@spec <ID>:` and put a `# @spec <ID>` comment on the behavior's entry point in code. Keep tools/ci.sh --python-only green, including `node tools/sdd/cli.mjs check`; gates run commands without a shell, so tools/ci.sh stays executable with a #!/usr/bin/env bash line. Branch rules (AGENTS.md): work only on the branch you are on and commit there; never push, never create or switch branches, never commit to main. ECC merges main into your branch before each attempt; if it did, keep both sides and make your unit pass on top. If a file your unit needs belongs to a dependency that is not merged yet, do not create it: finish what you can and report status blocked naming the missing unit; ECC re-runs you after it merges. Do not add __init__.py files under tests/ and do not edit pyproject.toml, uv.lock or any package __init__.py (M0-01 owns them). Never touch the v1 repository (my-research-mcp-server) or ~/arxiv-papers, never read real credentials or the Keychain, and use fakes and recorded fixtures for every external system; tests pass with the network blocked. A prior attempt exists read-only at ~/Documents/GitHub/my-research-mcp; you may read it, but the LLDs win wherever they differ, and the plan's clarifications list defects that attempt shipped.",
+   "depends_on": [
+    "M0-09"
+   ],
+   "scope": {
+    "files": [
+     "src/research_mcp/sources/arxiv.py",
+     "tests/sources/arxiv/fixtures/search_ok.xml",
+     "tests/sources/arxiv/fixtures/search_empty.xml",
+     "tests/sources/arxiv/fixtures/get_ok.xml",
+     "tests/sources/arxiv/fixtures/err_429.json",
+     "tests/sources/arxiv/fixtures/err_5xx.json",
+     "tests/sources/arxiv/fixtures/malformed.xml",
+     "tests/sources/arxiv/fixtures/oversize.marker",
+     "tests/sources/arxiv/test_arxiv.py"
+    ]
+   },
+   "acceptance": {
+    "commands": [
+     "uv run pytest tests/sources/arxiv/test_arxiv.py -q",
+     "uv run pytest tests/sources/test_conformance.py -k arxiv -q",
+     "tools/ci.sh --python-only"
+    ]
+   },
+   "risk": "medium",
+   "capabilities": {
+    "network": true,
+    "secrets": []
+   },
+   "routing": {
+    "initial_tier": 1,
+    "maximum_tier": 2,
+    "reviewer_must_differ_from_author": true
+   },
+   "budget": {
+    "attempts": 4,
+    "minutes": 240,
+    "maximum_cost_usd": 10.0
+   },
+   "rollback": "revert the unit branch; nothing outside this repository changes"
+  },
+  {
+   "schema_version": "1.0",
+   "id": "M0-11",
+   "title": "Crossref adapter",
+   "description": "Read AGENTS.md first. Build work unit M0-11 exactly as docs/build/M0-plan-v4.md specifies: its task row and the low level designs it implements: docs/lld/LLD-sources-v2.md (\u00a73.4, \u00a75.1, \u00a75.3; SPEC-v5 4). The LLDs own every name. Write a test for each acceptance criterion this unit owns: SRC-11 (their text is in docs/prd/components/PRD-sources-v5.md section 2.4); start each test's docstring with `@spec <ID>:` and put a `# @spec <ID>` comment on the behavior's entry point in code. Keep tools/ci.sh --python-only green, including `node tools/sdd/cli.mjs check`; gates run commands without a shell, so tools/ci.sh stays executable with a #!/usr/bin/env bash line. Branch rules (AGENTS.md): work only on the branch you are on and commit there; never push, never create or switch branches, never commit to main. ECC merges main into your branch before each attempt; if it did, keep both sides and make your unit pass on top. If a file your unit needs belongs to a dependency that is not merged yet, do not create it: finish what you can and report status blocked naming the missing unit; ECC re-runs you after it merges. Do not add __init__.py files under tests/ and do not edit pyproject.toml, uv.lock or any package __init__.py (M0-01 owns them). Never touch the v1 repository (my-research-mcp-server) or ~/arxiv-papers, never read real credentials or the Keychain, and use fakes and recorded fixtures for every external system; tests pass with the network blocked. A prior attempt exists read-only at ~/Documents/GitHub/my-research-mcp; you may read it, but the LLDs win wherever they differ, and the plan's clarifications list defects that attempt shipped.",
+   "depends_on": [
+    "M0-09"
+   ],
+   "scope": {
+    "files": [
+     "src/research_mcp/sources/crossref.py",
+     "tests/sources/crossref/fixtures/search_ok.json",
+     "tests/sources/crossref/fixtures/search_empty.json",
+     "tests/sources/crossref/fixtures/get_ok.json",
+     "tests/sources/crossref/fixtures/err_429.json",
+     "tests/sources/crossref/fixtures/err_5xx.json",
+     "tests/sources/crossref/fixtures/malformed.json",
+     "tests/sources/crossref/fixtures/oversize.marker",
+     "tests/sources/crossref/test_crossref.py"
+    ]
+   },
+   "acceptance": {
+    "commands": [
+     "uv run pytest tests/sources/crossref/test_crossref.py -q",
+     "uv run pytest tests/sources/test_conformance.py -k crossref -q",
+     "tools/ci.sh --python-only"
+    ]
+   },
+   "risk": "medium",
+   "capabilities": {
+    "network": true,
+    "secrets": []
+   },
+   "routing": {
+    "initial_tier": 1,
+    "maximum_tier": 2,
+    "reviewer_must_differ_from_author": true
+   },
+   "budget": {
+    "attempts": 4,
+    "minutes": 240,
+    "maximum_cost_usd": 10.0
+   },
+   "rollback": "revert the unit branch; nothing outside this repository changes"
+  },
+  {
+   "schema_version": "1.0",
+   "id": "M0-12",
+   "title": "OpenAlex adapter",
+   "description": "Read AGENTS.md first. Build work unit M0-12 exactly as docs/build/M0-plan-v4.md specifies: its task row and the low level designs it implements: docs/lld/LLD-sources-v2.md (\u00a73.4, \u00a75.1, \u00a75.3; SPEC-v5 4). The LLDs own every name. Write a test for each acceptance criterion this unit owns: SRC-12 (their text is in docs/prd/components/PRD-sources-v5.md section 2.4); start each test's docstring with `@spec <ID>:` and put a `# @spec <ID>` comment on the behavior's entry point in code. Keep tools/ci.sh --python-only green, including `node tools/sdd/cli.mjs check`; gates run commands without a shell, so tools/ci.sh stays executable with a #!/usr/bin/env bash line. Branch rules (AGENTS.md): work only on the branch you are on and commit there; never push, never create or switch branches, never commit to main. ECC merges main into your branch before each attempt; if it did, keep both sides and make your unit pass on top. If a file your unit needs belongs to a dependency that is not merged yet, do not create it: finish what you can and report status blocked naming the missing unit; ECC re-runs you after it merges. Do not add __init__.py files under tests/ and do not edit pyproject.toml, uv.lock or any package __init__.py (M0-01 owns them). Never touch the v1 repository (my-research-mcp-server) or ~/arxiv-papers, never read real credentials or the Keychain, and use fakes and recorded fixtures for every external system; tests pass with the network blocked. A prior attempt exists read-only at ~/Documents/GitHub/my-research-mcp; you may read it, but the LLDs win wherever they differ, and the plan's clarifications list defects that attempt shipped.",
+   "depends_on": [
+    "M0-09"
+   ],
+   "scope": {
+    "files": [
+     "src/research_mcp/sources/openalex.py",
+     "tests/sources/openalex/fixtures/search_ok.json",
+     "tests/sources/openalex/fixtures/search_empty.json",
+     "tests/sources/openalex/fixtures/get_ok.json",
+     "tests/sources/openalex/fixtures/err_429.json",
+     "tests/sources/openalex/fixtures/err_5xx.json",
+     "tests/sources/openalex/fixtures/malformed.json",
+     "tests/sources/openalex/fixtures/oversize.marker",
+     "tests/sources/openalex/test_openalex.py"
+    ]
+   },
+   "acceptance": {
+    "commands": [
+     "uv run pytest tests/sources/openalex/test_openalex.py -q",
+     "uv run pytest tests/sources/test_conformance.py -k openalex -q",
+     "tools/ci.sh --python-only"
+    ]
+   },
+   "risk": "medium",
+   "capabilities": {
+    "network": true,
+    "secrets": []
+   },
+   "routing": {
+    "initial_tier": 1,
+    "maximum_tier": 2,
+    "reviewer_must_differ_from_author": true
+   },
+   "budget": {
+    "attempts": 4,
+    "minutes": 240,
+    "maximum_cost_usd": 10.0
+   },
+   "rollback": "revert the unit branch; nothing outside this repository changes"
+  },
+  {
+   "schema_version": "1.0",
+   "id": "M0-13",
+   "title": "Grouping, merge and federation service",
+   "description": "Read AGENTS.md first. Build work unit M0-13 exactly as docs/build/M0-plan-v4.md specifies: its task row and the low level designs it implements: docs/lld/LLD-search-v2.md (\u00a75.3, \u00a75.4; SPEC-v5 5, 11.1). docs/build/M0-plan-v4.md section 2.2 lists clarifications for this unit; they are requirements. The LLDs own every name. Write a test for each acceptance criterion this unit owns: SRCH-1, SRCH-2, SRCH-3, SRCH-4, SRCH-5, SRCH-6, SRCH-7, SRCH-8, SRCH-9, SRCH-17 (their text is in docs/prd/components/PRD-search-v3.md section 2.4); start each test's docstring with `@spec <ID>:` and put a `# @spec <ID>` comment on the behavior's entry point in code. Keep tools/ci.sh --python-only green, including `node tools/sdd/cli.mjs check`; gates run commands without a shell, so tools/ci.sh stays executable with a #!/usr/bin/env bash line. Branch rules (AGENTS.md): work only on the branch you are on and commit there; never push, never create or switch branches, never commit to main. ECC merges main into your branch before each attempt; if it did, keep both sides and make your unit pass on top. If a file your unit needs belongs to a dependency that is not merged yet, do not create it: finish what you can and report status blocked naming the missing unit; ECC re-runs you after it merges. Do not add __init__.py files under tests/ and do not edit pyproject.toml, uv.lock or any package __init__.py (M0-01 owns them). Never touch the v1 repository (my-research-mcp-server) or ~/arxiv-papers, never read real credentials or the Keychain, and use fakes and recorded fixtures for every external system; tests pass with the network blocked. A prior attempt exists read-only at ~/Documents/GitHub/my-research-mcp; you may read it, but the LLDs win wherever they differ, and the plan's clarifications list defects that attempt shipped.",
+   "depends_on": [
+    "M0-09",
+    "M0-17",
+    "M0-18",
+    "M0-19"
+   ],
+   "scope": {
+    "files": [
+     "src/research_mcp/services/federation.py",
+     "src/research_mcp/services/works.py",
+     "tests/services/test_federation.py",
+     "tests/services/test_works.py"
+    ]
+   },
+   "acceptance": {
+    "commands": [
+     "uv run pytest tests/services/test_federation.py tests/services/test_works.py -q",
+     "tools/ci.sh --python-only"
+    ]
+   },
+   "risk": "high",
+   "capabilities": {
+    "network": true,
+    "secrets": []
+   },
+   "routing": {
+    "initial_tier": 2,
+    "maximum_tier": 2,
+    "reviewer_must_differ_from_author": true
+   },
+   "budget": {
+    "attempts": 4,
+    "minutes": 240,
+    "maximum_cost_usd": 10.0
+   },
+   "rollback": "revert the unit branch; nothing outside this repository changes"
+  },
+  {
+   "schema_version": "1.0",
+   "id": "M0-14",
+   "title": "MCP app: M0 tools, the sources resource and `@tool_boundary`",
+   "description": "Read AGENTS.md first. Build work unit M0-14 exactly as docs/build/M0-plan-v4.md specifies: its task row and the low level designs it implements: docs/lld/LLD-platform-v2.md (\u00a72.3, \u00a75.6); docs/lld/LLD-search-v2.md (\u00a72.1); docs/lld/LLD-sources-v2.md (\u00a72.4); SPEC-v5 5, 9. The LLDs own every name. Write a test for each acceptance criterion this unit owns: SRCH-20, SRCH-21, SRCH-22, SRCH-23, SRC-8, PLAT-60, PLAT-61, PLAT-62, PLAT-63 (their text is in docs/prd/components/PRD-search-v3.md, docs/prd/components/PRD-sources-v5.md, docs/prd/components/PRD-platform-v4.md section 2.4); start each test's docstring with `@spec <ID>:` and put a `# @spec <ID>` comment on the behavior's entry point in code. Keep tools/ci.sh --python-only green, including `node tools/sdd/cli.mjs check`; gates run commands without a shell, so tools/ci.sh stays executable with a #!/usr/bin/env bash line. Branch rules (AGENTS.md): work only on the branch you are on and commit there; never push, never create or switch branches, never commit to main. ECC merges main into your branch before each attempt; if it did, keep both sides and make your unit pass on top. If a file your unit needs belongs to a dependency that is not merged yet, do not create it: finish what you can and report status blocked naming the missing unit; ECC re-runs you after it merges. Do not add __init__.py files under tests/ and do not edit pyproject.toml, uv.lock or any package __init__.py (M0-01 owns them). Never touch the v1 repository (my-research-mcp-server) or ~/arxiv-papers, never read real credentials or the Keychain, and use fakes and recorded fixtures for every external system; tests pass with the network blocked. A prior attempt exists read-only at ~/Documents/GitHub/my-research-mcp; you may read it, but the LLDs win wherever they differ, and the plan's clarifications list defects that attempt shipped.",
+   "depends_on": [
+    "M0-08",
+    "M0-13"
+   ],
+   "scope": {
+    "files": [
+     "src/research_mcp/mcp_app/server.py",
+     "src/research_mcp/mcp_app/tools_discovery.py",
+     "src/research_mcp/mcp_app/resources.py",
+     "tests/contract/conftest.py",
+     "tests/contract/test_tools_discovery.py",
+     "tests/contract/test_tool_contract.py"
+    ]
+   },
+   "acceptance": {
+    "commands": [
+     "uv run pytest tests/contract/test_tools_discovery.py tests/contract/test_tool_contract.py -q",
+     "tools/ci.sh --python-only"
+    ]
+   },
+   "risk": "high",
+   "capabilities": {
+    "network": true,
+    "secrets": []
+   },
+   "routing": {
+    "initial_tier": 2,
+    "maximum_tier": 2,
+    "reviewer_must_differ_from_author": true
+   },
+   "budget": {
+    "attempts": 4,
+    "minutes": 240,
+    "maximum_cost_usd": 10.0
+   },
+   "rollback": "revert the unit branch; nothing outside this repository changes"
+  },
+  {
+   "schema_version": "1.0",
+   "id": "M0-15",
+   "title": "Daemon, composition root, scheduler and stdio shim",
+   "description": "Read AGENTS.md first. Build work unit M0-15 exactly as docs/build/M0-plan-v4.md specifies: its task row and the low level designs it implements: docs/lld/LLD-platform-v2.md (\u00a74.5, \u00a75.2, \u00a75.5, \u00a75.7, \u00a75.10); docs/lld/LLD-health-v2.md (\u00a72.1, \u00a75.10); docs/lld/LLD-security-v2.md (\u00a75.2); SPEC-v5 2, 3, 9. docs/build/M0-plan-v4.md section 2.2 lists clarifications for this unit; they are requirements. The LLDs own every name. Write a test for each acceptance criterion this unit owns: PLAT-70, SEC-11, SEC-12, PLAT-71, PLAT-72, PLAT-73, PLAT-74, PLAT-75, PLAT-76, PLAT-77, SEC-4 (their text is in docs/prd/components/PRD-platform-v4.md, docs/prd/components/PRD-security-v3.md section 2.4); start each test's docstring with `@spec <ID>:` and put a `# @spec <ID>` comment on the behavior's entry point in code. Keep tools/ci.sh --python-only green, including `node tools/sdd/cli.mjs check`; gates run commands without a shell, so tools/ci.sh stays executable with a #!/usr/bin/env bash line. Branch rules (AGENTS.md): work only on the branch you are on and commit there; never push, never create or switch branches, never commit to main. ECC merges main into your branch before each attempt; if it did, keep both sides and make your unit pass on top. If a file your unit needs belongs to a dependency that is not merged yet, do not create it: finish what you can and report status blocked naming the missing unit; ECC re-runs you after it merges. Do not add __init__.py files under tests/ and do not edit pyproject.toml, uv.lock or any package __init__.py (M0-01 owns them). Never touch the v1 repository (my-research-mcp-server) or ~/arxiv-papers, never read real credentials or the Keychain, and use fakes and recorded fixtures for every external system; tests pass with the network blocked. A prior attempt exists read-only at ~/Documents/GitHub/my-research-mcp; you may read it, but the LLDs win wherever they differ, and the plan's clarifications list defects that attempt shipped.",
+   "depends_on": [
+    "M0-14",
+    "M0-19",
+    "M0-20"
+   ],
+   "scope": {
+    "files": [
+     "src/research_mcp/app.py",
+     "src/research_mcp/daemon.py",
+     "src/research_mcp/shim.py",
+     "src/research_mcp/platform/auth.py",
+     "src/research_mcp/platform/jobs.py",
+     "src/research_mcp/platform/scheduler.py",
+     "src/research_mcp/testing/launchctl.py",
+     "tests/integration/test_app.py",
+     "tests/integration/test_shim.py",
+     "tests/integration/test_jobs.py",
+     "tests/integration/test_scheduler.py",
+     "tests/integration/test_reload.py",
+     "tests/security/test_loopback_auth.py"
+    ]
+   },
+   "acceptance": {
+    "commands": [
+     "uv run pytest tests/integration/test_app.py tests/integration/test_shim.py tests/integration/test_jobs.py tests/integration/test_scheduler.py tests/integration/test_reload.py tests/security/test_loopback_auth.py -q",
+     "tools/ci.sh --python-only"
+    ]
+   },
+   "risk": "high",
+   "capabilities": {
+    "network": true,
+    "secrets": []
+   },
+   "routing": {
+    "initial_tier": 2,
+    "maximum_tier": 2,
+    "reviewer_must_differ_from_author": true
+   },
+   "budget": {
+    "attempts": 4,
+    "minutes": 240,
+    "maximum_cost_usd": 10.0
+   },
+   "rollback": "revert the unit branch; nothing outside this repository changes"
+  },
+  {
+   "schema_version": "1.0",
+   "id": "M0-16",
+   "title": "CLI, install, doctor skeleton and launchd templates",
+   "description": "Read AGENTS.md first. Build work unit M0-16 exactly as docs/build/M0-plan-v4.md specifies: its task row and the low level designs it implements: docs/lld/LLD-health-v2.md (\u00a72.3, \u00a75.9); docs/lld/LLD-platform-v2.md (\u00a72.4, \u00a72.5, \u00a75.8, \u00a75.9); docs/lld/LLD-security-v2.md (\u00a75.2); docs/lld/LLD-sources-v2.md (\u00a75.10); SPEC-v5 12. The LLDs own every name. Write a test for each acceptance criterion this unit owns: PLAT-80, PLAT-81, PLAT-82, PLAT-83, SEC-30, SRC-13, HLTH-40 (their text is in docs/prd/components/PRD-platform-v4.md, docs/prd/components/PRD-security-v3.md, docs/prd/components/PRD-sources-v5.md, docs/prd/components/PRD-health-v4.md section 2.4); start each test's docstring with `@spec <ID>:` and put a `# @spec <ID>` comment on the behavior's entry point in code. Keep tools/ci.sh --python-only green, including `node tools/sdd/cli.mjs check`; gates run commands without a shell, so tools/ci.sh stays executable with a #!/usr/bin/env bash line. Branch rules (AGENTS.md): work only on the branch you are on and commit there; never push, never create or switch branches, never commit to main. ECC merges main into your branch before each attempt; if it did, keep both sides and make your unit pass on top. If a file your unit needs belongs to a dependency that is not merged yet, do not create it: finish what you can and report status blocked naming the missing unit; ECC re-runs you after it merges. Do not add __init__.py files under tests/ and do not edit pyproject.toml, uv.lock or any package __init__.py (M0-01 owns them). Never touch the v1 repository (my-research-mcp-server) or ~/arxiv-papers, never read real credentials or the Keychain, and use fakes and recorded fixtures for every external system; tests pass with the network blocked. A prior attempt exists read-only at ~/Documents/GitHub/my-research-mcp; you may read it, but the LLDs win wherever they differ, and the plan's clarifications list defects that attempt shipped.",
+   "depends_on": [
+    "M0-10",
+    "M0-11",
+    "M0-12",
+    "M0-15"
+   ],
+   "scope": {
+    "files": [
+     "src/research_mcp/cli.py",
+     "src/research_mcp/services/doctor.py",
+     "src/research_mcp/packaging/launchd/local.research-mcpd.plist.template",
+     "src/research_mcp/packaging/launchd/local.research-mcp-doctor.plist.template",
+     "src/research_mcp/packaging/launchd/local.research-mcp-watchdog.plist.template",
+     "tools/gen_inventory.py",
+     "docs/generated/sources.md",
+     "tests/unit/test_cli.py",
+     "tests/unit/test_install.py"
+    ]
+   },
+   "acceptance": {
+    "commands": [
+     "uv run pytest tests/unit/test_cli.py tests/unit/test_install.py -q",
+     "tools/ci.sh --python-only"
+    ]
+   },
+   "risk": "medium",
+   "capabilities": {
+    "network": true,
+    "secrets": []
+   },
+   "routing": {
+    "initial_tier": 1,
+    "maximum_tier": 2,
+    "reviewer_must_differ_from_author": true
+   },
+   "budget": {
+    "attempts": 4,
+    "minutes": 240,
+    "maximum_cost_usd": 10.0
+   },
+   "rollback": "revert the unit branch; nothing outside this repository changes"
+  },
+  {
+   "schema_version": "1.0",
+   "id": "M0-17",
+   "title": "Follow-up to M0-02: URL trailing-slash rule",
+   "description": "Read AGENTS.md first. Build work unit M0-17 exactly as docs/build/M0-plan-v4.md specifies: its task row and the low level designs it implements: docs/lld/LLD-search-v2.md (\u00a75.2, \u00a712; SPEC-v5 5). The LLDs own every name. Write a test for each acceptance criterion this unit owns: SRCH-38 (their text is in docs/prd/components/PRD-search-v3.md section 2.4); start each test's docstring with `@spec <ID>:` and put a `# @spec <ID>` comment on the behavior's entry point in code. Keep tools/ci.sh --python-only green, including `node tools/sdd/cli.mjs check`; gates run commands without a shell, so tools/ci.sh stays executable with a #!/usr/bin/env bash line. Branch rules (AGENTS.md): work only on the branch you are on and commit there; never push, never create or switch branches, never commit to main. ECC merges main into your branch before each attempt; if it did, keep both sides and make your unit pass on top. If a file your unit needs belongs to a dependency that is not merged yet, do not create it: finish what you can and report status blocked naming the missing unit; ECC re-runs you after it merges. Do not add __init__.py files under tests/ and do not edit pyproject.toml, uv.lock or any package __init__.py (M0-01 owns them). Never touch the v1 repository (my-research-mcp-server) or ~/arxiv-papers, never read real credentials or the Keychain, and use fakes and recorded fixtures for every external system; tests pass with the network blocked. A prior attempt exists read-only at ~/Documents/GitHub/my-research-mcp; you may read it, but the LLDs win wherever they differ, and the plan's clarifications list defects that attempt shipped.",
+   "depends_on": [],
+   "scope": {
+    "files": [
+     "src/research_mcp/core/ids.py",
+     "tests/unit/core/test_ids.py"
+    ]
+   },
+   "acceptance": {
+    "commands": [
+     "uv run pytest tests/unit/core/test_ids.py -q",
+     "tools/ci.sh --python-only"
+    ]
+   },
+   "risk": "low",
+   "capabilities": {
+    "network": true,
+    "secrets": []
+   },
+   "routing": {
+    "initial_tier": 0,
+    "maximum_tier": 2,
+    "reviewer_must_differ_from_author": true
+   },
+   "budget": {
+    "attempts": 4,
+    "minutes": 240,
+    "maximum_cost_usd": 10.0
+   },
+   "rollback": "revert the unit branch; nothing outside this repository changes"
+  },
+  {
+   "schema_version": "1.0",
+   "id": "M0-18",
+   "title": "Follow-up to M0-03: source states `budget_exhausted` and `not_needed` in the envelope",
+   "description": "Read AGENTS.md first. Build work unit M0-18 exactly as docs/build/M0-plan-v4.md specifies: its task row and the low level designs it implements: docs/lld/LLD-platform-v2.md (\u00a72.1); docs/lld/LLD-search-v2.md (\u00a712; SPEC-v5 5). The LLDs own every name. Write a test for each acceptance criterion this unit owns: PLAT-30 (their text is in docs/prd/components/PRD-platform-v4.md section 2.4); start each test's docstring with `@spec <ID>:` and put a `# @spec <ID>` comment on the behavior's entry point in code. Keep tools/ci.sh --python-only green, including `node tools/sdd/cli.mjs check`; gates run commands without a shell, so tools/ci.sh stays executable with a #!/usr/bin/env bash line. Branch rules (AGENTS.md): work only on the branch you are on and commit there; never push, never create or switch branches, never commit to main. ECC merges main into your branch before each attempt; if it did, keep both sides and make your unit pass on top. If a file your unit needs belongs to a dependency that is not merged yet, do not create it: finish what you can and report status blocked naming the missing unit; ECC re-runs you after it merges. Do not add __init__.py files under tests/ and do not edit pyproject.toml, uv.lock or any package __init__.py (M0-01 owns them). Never touch the v1 repository (my-research-mcp-server) or ~/arxiv-papers, never read real credentials or the Keychain, and use fakes and recorded fixtures for every external system; tests pass with the network blocked. A prior attempt exists read-only at ~/Documents/GitHub/my-research-mcp; you may read it, but the LLDs win wherever they differ, and the plan's clarifications list defects that attempt shipped.",
+   "depends_on": [],
+   "scope": {
+    "files": [
+     "src/research_mcp/core/envelope.py",
+     "tests/unit/core/test_envelope.py"
+    ]
+   },
+   "acceptance": {
+    "commands": [
+     "uv run pytest tests/unit/core/test_envelope.py -q",
+     "tools/ci.sh --python-only"
+    ]
+   },
+   "risk": "low",
+   "capabilities": {
+    "network": true,
+    "secrets": []
+   },
+   "routing": {
+    "initial_tier": 0,
+    "maximum_tier": 2,
+    "reviewer_must_differ_from_author": true
+   },
+   "budget": {
+    "attempts": 4,
+    "minutes": 240,
+    "maximum_cost_usd": 10.0
+   },
+   "rollback": "revert the unit branch; nothing outside this repository changes"
+  },
+  {
+   "schema_version": "1.0",
+   "id": "M0-19",
+   "title": "Follow-up to M0-04: placeholder email rule, `env:` rejection for `server.token`, new setting defaults (including `logging.debug`), and the search keys `federation.fuzzy_merge` and `federation.record_searches`",
+   "description": "Read AGENTS.md first. Build work unit M0-19 exactly as docs/build/M0-plan-v4.md specifies: its task row and the low level designs it implements: docs/lld/LLD-platform-v2.md (\u00a74.1, \u00a74.3, \u00a77.1, \u00a79); docs/lld/LLD-search-v2.md (\u00a77.2); SPEC-v5 4, 9, 10. The LLDs own every name. Write a test for each acceptance criterion this unit owns: PLAT-8, PLAT-11, PLAT-12 (their text is in docs/prd/components/PRD-platform-v4.md section 2.4); start each test's docstring with `@spec <ID>:` and put a `# @spec <ID>` comment on the behavior's entry point in code. Keep tools/ci.sh --python-only green, including `node tools/sdd/cli.mjs check`; gates run commands without a shell, so tools/ci.sh stays executable with a #!/usr/bin/env bash line. Branch rules (AGENTS.md): work only on the branch you are on and commit there; never push, never create or switch branches, never commit to main. ECC merges main into your branch before each attempt; if it did, keep both sides and make your unit pass on top. If a file your unit needs belongs to a dependency that is not merged yet, do not create it: finish what you can and report status blocked naming the missing unit; ECC re-runs you after it merges. Do not add __init__.py files under tests/ and do not edit pyproject.toml, uv.lock or any package __init__.py (M0-01 owns them). Never touch the v1 repository (my-research-mcp-server) or ~/arxiv-papers, never read real credentials or the Keychain, and use fakes and recorded fixtures for every external system; tests pass with the network blocked. A prior attempt exists read-only at ~/Documents/GitHub/my-research-mcp; you may read it, but the LLDs win wherever they differ, and the plan's clarifications list defects that attempt shipped.",
+   "depends_on": [],
+   "scope": {
+    "files": [
+     "src/research_mcp/settings.py",
+     "tests/unit/test_settings.py"
+    ]
+   },
+   "acceptance": {
+    "commands": [
+     "uv run pytest tests/unit/test_settings.py -q",
+     "tools/ci.sh --python-only"
+    ]
+   },
+   "risk": "medium",
+   "capabilities": {
+    "network": true,
+    "secrets": []
+   },
+   "routing": {
+    "initial_tier": 1,
+    "maximum_tier": 2,
+    "reviewer_must_differ_from_author": true
+   },
+   "budget": {
+    "attempts": 4,
+    "minutes": 240,
+    "maximum_cost_usd": 10.0
+   },
+   "rollback": "revert the unit branch; nothing outside this repository changes"
+  },
+  {
+   "schema_version": "1.0",
+   "id": "M0-20",
+   "title": "Follow-up to M0-05: secret type, Keychain provider and cache reload as redesigned",
+   "description": "Read AGENTS.md first. Build work unit M0-20 exactly as docs/build/M0-plan-v4.md specifies: its task row and the low level designs it implements: docs/lld/LLD-platform-v2.md (\u00a74.1, \u00a75.10, \u00a79); docs/lld/LLD-security-v2.md (\u00a74.3); docs/lld/LLD-health-v2.md (\u00a75.2); SPEC-v5 9. The LLDs own every name. Write a test for each acceptance criterion this unit owns: SEC-1, SEC-2, SEC-3, SEC-4, PLAT-12 (their text is in docs/prd/components/PRD-security-v3.md, docs/prd/components/PRD-platform-v4.md section 2.4); start each test's docstring with `@spec <ID>:` and put a `# @spec <ID>` comment on the behavior's entry point in code. Keep tools/ci.sh --python-only green, including `node tools/sdd/cli.mjs check`; gates run commands without a shell, so tools/ci.sh stays executable with a #!/usr/bin/env bash line. Branch rules (AGENTS.md): work only on the branch you are on and commit there; never push, never create or switch branches, never commit to main. ECC merges main into your branch before each attempt; if it did, keep both sides and make your unit pass on top. If a file your unit needs belongs to a dependency that is not merged yet, do not create it: finish what you can and report status blocked naming the missing unit; ECC re-runs you after it merges. Do not add __init__.py files under tests/ and do not edit pyproject.toml, uv.lock or any package __init__.py (M0-01 owns them). Never touch the v1 repository (my-research-mcp-server) or ~/arxiv-papers, never read real credentials or the Keychain, and use fakes and recorded fixtures for every external system; tests pass with the network blocked. A prior attempt exists read-only at ~/Documents/GitHub/my-research-mcp; you may read it, but the LLDs win wherever they differ, and the plan's clarifications list defects that attempt shipped.",
+   "depends_on": [],
+   "scope": {
+    "files": [
+     "src/research_mcp/platform/secrets.py",
+     "tests/unit/platform/test_secrets.py"
+    ]
+   },
+   "acceptance": {
+    "commands": [
+     "uv run pytest tests/unit/platform/test_secrets.py -q",
+     "tools/ci.sh --python-only"
+    ]
+   },
+   "risk": "high",
+   "capabilities": {
+    "network": true,
+    "secrets": []
+   },
+   "routing": {
+    "initial_tier": 2,
+    "maximum_tier": 2,
+    "reviewer_must_differ_from_author": true
+   },
+   "budget": {
+    "attempts": 4,
+    "minutes": 240,
+    "maximum_cost_usd": 10.0
+   },
+   "rollback": "revert the unit branch; nothing outside this repository changes"
+  },
+  {
+   "schema_version": "1.0",
+   "id": "M0-21",
+   "title": "Federation: `auto` skips rate-limited sources and reports their status",
+   "description": "Read AGENTS.md first. Build work unit M0-21 exactly as docs/build/M0-plan-v4.md specifies: its task row and the low level designs it implements: docs/lld/LLD-search-v2.md (\u00a75.4; SPEC-v5 5, 11.1); docs/lld/LLD-health-v2.md (\u00a75.5). The LLDs own every name. Write a test for each acceptance criterion this unit owns: SRCH-37 (their text is in docs/prd/components/PRD-search-v3.md section 2.4); start each test's docstring with `@spec <ID>:` and put a `# @spec <ID>` comment on the behavior's entry point in code. Keep tools/ci.sh --python-only green, including `node tools/sdd/cli.mjs check`; gates run commands without a shell, so tools/ci.sh stays executable with a #!/usr/bin/env bash line. Branch rules (AGENTS.md): work only on the branch you are on and commit there; never push, never create or switch branches, never commit to main. ECC merges main into your branch before each attempt; if it did, keep both sides and make your unit pass on top. If a file your unit needs belongs to a dependency that is not merged yet, do not create it: finish what you can and report status blocked naming the missing unit; ECC re-runs you after it merges. Do not add __init__.py files under tests/ and do not edit pyproject.toml, uv.lock or any package __init__.py (M0-01 owns them). Never touch the v1 repository (my-research-mcp-server) or ~/arxiv-papers, never read real credentials or the Keychain, and use fakes and recorded fixtures for every external system; tests pass with the network blocked. A prior attempt exists read-only at ~/Documents/GitHub/my-research-mcp; you may read it, but the LLDs win wherever they differ, and the plan's clarifications list defects that attempt shipped.",
+   "depends_on": [
+    "M0-13"
+   ],
+   "scope": {
+    "files": [
+     "src/research_mcp/services/federation.py",
+     "tests/services/test_federation.py"
+    ]
+   },
+   "acceptance": {
+    "commands": [
+     "uv run pytest tests/services/test_federation.py -q",
+     "tools/ci.sh --python-only"
+    ]
+   },
+   "risk": "medium",
+   "capabilities": {
+    "network": true,
+    "secrets": []
+   },
+   "routing": {
+    "initial_tier": 1,
+    "maximum_tier": 2,
+    "reviewer_must_differ_from_author": true
+   },
+   "budget": {
+    "attempts": 4,
+    "minutes": 240,
+    "maximum_cost_usd": 10.0
+   },
+   "rollback": "revert the unit branch; nothing outside this repository changes"
+  },
+  {
+   "schema_version": "1.0",
+   "id": "M0-22",
+   "title": "Shim reads the daemon token only from the Keychain",
+   "description": "Read AGENTS.md first. Build work unit M0-22 exactly as docs/build/M0-plan-v4.md specifies: its task row and the low level designs it implements: docs/lld/LLD-platform-v2.md (\u00a74.5, \u00a75.7); docs/lld/LLD-security-v2.md (\u00a74.3, \u00a75.2); SPEC-v5 2, 9. The LLDs own every name. Write a test for each acceptance criterion this unit owns: SEC-26 (their text is in docs/prd/components/PRD-security-v3.md section 2.4); start each test's docstring with `@spec <ID>:` and put a `# @spec <ID>` comment on the behavior's entry point in code. Keep tools/ci.sh --python-only green, including `node tools/sdd/cli.mjs check`; gates run commands without a shell, so tools/ci.sh stays executable with a #!/usr/bin/env bash line. Branch rules (AGENTS.md): work only on the branch you are on and commit there; never push, never create or switch branches, never commit to main. ECC merges main into your branch before each attempt; if it did, keep both sides and make your unit pass on top. If a file your unit needs belongs to a dependency that is not merged yet, do not create it: finish what you can and report status blocked naming the missing unit; ECC re-runs you after it merges. Do not add __init__.py files under tests/ and do not edit pyproject.toml, uv.lock or any package __init__.py (M0-01 owns them). Never touch the v1 repository (my-research-mcp-server) or ~/arxiv-papers, never read real credentials or the Keychain, and use fakes and recorded fixtures for every external system; tests pass with the network blocked. A prior attempt exists read-only at ~/Documents/GitHub/my-research-mcp; you may read it, but the LLDs win wherever they differ, and the plan's clarifications list defects that attempt shipped.",
+   "depends_on": [
+    "M0-15"
+   ],
+   "scope": {
+    "files": [
+     "src/research_mcp/shim.py",
+     "tests/unit/test_shim.py"
+    ]
+   },
+   "acceptance": {
+    "commands": [
+     "uv run pytest tests/unit/test_shim.py -q",
+     "tools/ci.sh --python-only"
+    ]
+   },
+   "risk": "high",
+   "capabilities": {
+    "network": true,
+    "secrets": []
+   },
+   "routing": {
+    "initial_tier": 2,
+    "maximum_tier": 2,
+    "reviewer_must_differ_from_author": true
+   },
+   "budget": {
+    "attempts": 4,
+    "minutes": 240,
+    "maximum_cost_usd": 10.0
+   },
+   "rollback": "revert the unit branch; nothing outside this repository changes"
+  },
+  {
+   "schema_version": "1.0",
+   "id": "M0-23",
+   "title": "No registered secret at rest after install, daemon start and reload",
+   "description": "Read AGENTS.md first. Build work unit M0-23 exactly as docs/build/M0-plan-v4.md specifies: its task row and the low level designs it implements: docs/lld/LLD-security-v2.md (\u00a73, \u00a74.4); docs/lld/LLD-platform-v2.md (\u00a74.1, \u00a74.7, \u00a75.9, \u00a75.10); SPEC-v5 9, 10. The LLDs own every name. Write a test for each acceptance criterion this unit owns: SEC-24 (their text is in docs/prd/components/PRD-security-v3.md section 2.4); start each test's docstring with `@spec <ID>:` and put a `# @spec <ID>` comment on the behavior's entry point in code. Keep tools/ci.sh --python-only green, including `node tools/sdd/cli.mjs check`; gates run commands without a shell, so tools/ci.sh stays executable with a #!/usr/bin/env bash line. Branch rules (AGENTS.md): work only on the branch you are on and commit there; never push, never create or switch branches, never commit to main. ECC merges main into your branch before each attempt; if it did, keep both sides and make your unit pass on top. If a file your unit needs belongs to a dependency that is not merged yet, do not create it: finish what you can and report status blocked naming the missing unit; ECC re-runs you after it merges. Do not add __init__.py files under tests/ and do not edit pyproject.toml, uv.lock or any package __init__.py (M0-01 owns them). Never touch the v1 repository (my-research-mcp-server) or ~/arxiv-papers, never read real credentials or the Keychain, and use fakes and recorded fixtures for every external system; tests pass with the network blocked. A prior attempt exists read-only at ~/Documents/GitHub/my-research-mcp; you may read it, but the LLDs win wherever they differ, and the plan's clarifications list defects that attempt shipped.",
+   "depends_on": [
+    "M0-16",
+    "M0-19",
+    "M0-20",
+    "M0-22"
+   ],
+   "scope": {
+    "files": [
+     "tests/security/test_no_secret_at_rest.py",
+     "src/research_mcp/cli.py",
+     "src/research_mcp/daemon.py",
+     "src/research_mcp/platform/secrets.py"
+    ]
+   },
+   "acceptance": {
+    "commands": [
+     "uv run pytest tests/security/test_no_secret_at_rest.py -q",
+     "tools/ci.sh --python-only"
+    ]
+   },
+   "risk": "high",
+   "capabilities": {
+    "network": true,
+    "secrets": []
+   },
+   "routing": {
+    "initial_tier": 2,
+    "maximum_tier": 2,
+    "reviewer_must_differ_from_author": true
+   },
+   "budget": {
+    "attempts": 4,
+    "minutes": 240,
+    "maximum_cost_usd": 10.0
+   },
+   "rollback": "revert the unit branch; nothing outside this repository changes"
+  }
+ ]
+}

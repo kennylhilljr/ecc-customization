@@ -8,7 +8,20 @@ Codex and Claude write code; Codex, Claude and Gemini review, verify and play th
 
 ## Before the first run
 
-1. The plan: `.orchestration/plan-{{MILESTONE_LC}}.json`, generated from the specification's work breakdown and the test plan.
+1. The plan: `.orchestration/plan-{{MILESTONE_LC}}.json`, generated from the milestone plan's task table:
+
+   ```sh
+   cp .orchestration/PLAN-TEMPLATE.md docs/build/{{MILESTONE}}-plan-v1.md   # once; then write the real tasks
+   ecc-kit plan-json docs/build/{{MILESTONE}}-plan-v1.md .orchestration/plan-{{MILESTONE_LC}}.json
+   ```
+
+   Set `package_path`, `criterion_prds` and, for projects with source adapters, `adapter_folder`, `adapter_exclude`, `adapter_ids`, `fixture_names` and `conformance_command` in `.orchestration/plan-json.json` first. Add the freshness check to `tools/ci.sh` so a stale plan JSON fails the gate:
+
+   ```sh
+   ecc-kit plan-json --check docs/build/{{MILESTONE}}-plan-v1.md .orchestration/plan-{{MILESTONE_LC}}.json
+   ```
+
+   `--check` writes nothing and exits 1 when the JSON is missing or differs from what the plan generates. Then lint it with `ecc lint-plan`.
 2. From this folder (the `ecc` command is in ecc-customization's `bin/`):
 
    ```sh
