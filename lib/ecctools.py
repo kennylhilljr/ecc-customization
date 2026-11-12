@@ -6,6 +6,7 @@ and a secret scan. Standard library only; Python 3.9 or newer.
     ecctools.py kit-new REPO --name NAME [options]
     ecctools.py kit-diff REPO
     ecctools.py kit-sync REPO
+    ecctools.py kit-plan-json PLAN.md OUT.json [--milestone M1] [--check]
     ecctools.py snapshot --root machine [--home DIR]
     ecctools.py restore --root machine [--home DIR] [--overwrite] [--dry-run]
     ecctools.py openclaw-restore --archive PATH --dest DIR
@@ -863,6 +864,456 @@ def kit_sync(repo):
     return 0
 
 
+# ------------------------------------------------------------------ plan-json
+PLAN_CONFIG = os.path.join(".orchestration", "plan-json.json")
+PLAN_COLUMNS = ["#", "Task", "Criteria", "Depends on", "Persona", "Implements", "Files (scope)",
+                "Risk", "Status"]
+PLAN_OPTIONAL_COLUMNS = ["Provides", "Requires"]
+PLAN_TOP = ("src/", "tests/", "tools/", "docs/", ".github/")
+PLAN_RISK_TIERS = {"low": 0, "medium": 1, "high": 2}
+PLAN_PLACEHOLDERS = {"uid", "plan", "implemented", "note", "criteria", "prds", "rules"}
+PLAN_NOTE = " {plan} section 2.2 lists clarifications for this unit; they are requirements."
+PLAN_DEFAULTS = {
+    "package_path": "",
+    "root_files": [],
+    "adapter_folder": None,
+    "adapter_exclude": [],
+    "adapter_ids": {},
+    "fixture_names": [],
+    "fixture_extensions": {},
+    "criterion_prds": {},
+    "rules": "",
+    "description_template": (
+        "Read AGENTS.md first. Build work unit {uid} exactly as {plan} specifies: its task row and "
+        "the designs it implements: {implemented}.{note} Write a test for each acceptance criterion "
+        "this unit owns: {criteria} (their text is in {prds}). {rules}"),
+    "test_command": "uv run pytest {tests} -q",
+    "conformance_command": None,
+    "gate_command": "tools/ci.sh",
+    "acceptance_overrides": {},
+    "unit_defaults": {
+        "capabilities": {"network": False, "secrets": []},
+        "budget": {"attempts": 2, "minutes": 30, "maximum_cost_usd": 5},
+        "rollback": "Revert the commit.",
+    },
+}
+
+
+class PlanJsonError(Exception):
+    """A plan or configuration problem; the message names the file and what is wrong."""
+
+
+def find_plan_config(plan_path):
+    """(project root, config path): the nearest .orchestration/plan-json.json above the plan."""
+    d = os.path.dirname(os.path.abspath(plan_path))
+    while True:
+        cand = os.path.join(d, PLAN_CONFIG)
+        if os.path.isfile(cand):
+            return d, cand
+        parent = os.path.dirname(d)
+        if parent == d:
+            raise PlanJsonError(f"{plan_path}: no {PLAN_CONFIG} in this folder or any folder above it")
+        d = parent
+
+
+def _template_names(text, where):
+    import string
+    try:
+        return {name for _, name, _, _ in string.Formatter().parse(text) if name is not None}
+    except ValueError as e:
+        raise PlanJsonError(f"{where}: bad template ({e})") from None
+
+
+def _cfg_type(cfg, key, types, where, nullable=False):
+    value = cfg[key]
+    if value is None and nullable:
+        return
+    if not isinstance(value, types):
+        raise PlanJsonError(f"{where}: '{key}' must be a {types.__name__}{' or null' if nullable else ''}")
+
+
+def _str_list(value, key, where):
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise PlanJsonError(f"{where}: '{key}' must be a list of strings")
+
+
+def _str_map(value, key, where):
+    if not isinstance(value, dict) or not all(isinstance(v, str) for v in value.values()):
+        raise PlanJsonError(f"{where}: '{key}' must map strings to strings")
+
+
+def load_plan_config(path):
+    """Read and validate a plan-json configuration; missing keys take PLAN_DEFAULTS."""
+    where = path
+    try:
+        with open(path, encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except OSError as e:
+        raise PlanJsonError(f"{where}: cannot read ({e.strerror})") from None
+    except json.JSONDecodeError as e:
+        raise PlanJsonError(f"{where}:{e.lineno}: not valid JSON ({e.msg})") from None
+    if not isinstance(raw, dict):
+        raise PlanJsonError(f"{where}: the configuration must be a JSON object")
+    unknown = sorted(set(raw) - set(PLAN_DEFAULTS) - {"$comment"})
+    if unknown:
+        raise PlanJsonError(f"{where}: unknown keys {unknown}")
+    cfg = json.loads(json.dumps(PLAN_DEFAULTS))
+    for k, v in raw.items():
+        if k != "$comment":
+            cfg[k] = v
+    for key in ("package_path", "rules", "description_template", "test_command"):
+        _cfg_type(cfg, key, str, where)
+    for key in ("adapter_folder", "conformance_command", "gate_command"):
+        _cfg_type(cfg, key, str, where, nullable=True)
+    for key in ("root_files", "adapter_exclude", "fixture_names"):
+        _str_list(cfg[key], key, where)
+    for key in ("adapter_ids", "fixture_extensions", "criterion_prds"):
+        _str_map(cfg[key], key, where)
+    ov = cfg["acceptance_overrides"]
+    if not isinstance(ov, dict):
+        raise PlanJsonError(f"{where}: 'acceptance_overrides' must map unit ids to command lists")
+    for uid, cmds in ov.items():
+        _str_list(cmds, f"acceptance_overrides.{uid}", where)
+    ud = cfg["unit_defaults"]
+    if not isinstance(ud, dict):
+        raise PlanJsonError(f"{where}: 'unit_defaults' must be an object")
+    bad = sorted(set(ud) - {"capabilities", "budget", "rollback"})
+    if bad:
+        raise PlanJsonError(f"{where}: unknown keys in 'unit_defaults': {bad}")
+    merged = dict(PLAN_DEFAULTS["unit_defaults"])
+    merged.update(ud)
+    for key in ("capabilities", "budget"):
+        if not isinstance(merged[key], dict):
+            raise PlanJsonError(f"{where}: 'unit_defaults.{key}' must be an object")
+    if not isinstance(merged["rollback"], str):
+        raise PlanJsonError(f"{where}: 'unit_defaults.rollback' must be a string")
+    cfg["unit_defaults"] = merged
+    if cfg["adapter_folder"] is not None:
+        folder = cfg["adapter_folder"].strip("/")
+        if not folder or os.path.isabs(cfg["adapter_folder"]) or ".." in folder.split("/"):
+            raise PlanJsonError(f"{where}: 'adapter_folder' must be a project-relative folder")
+        cfg["adapter_folder"] = folder
+    if cfg["package_path"] and not cfg["package_path"].endswith("/"):
+        cfg["package_path"] += "/"
+    names = _template_names(cfg["description_template"], f"{where}: 'description_template'")
+    extra = sorted(names - PLAN_PLACEHOLDERS)
+    if extra:
+        raise PlanJsonError(f"{where}: 'description_template' has unknown placeholders {extra}; "
+                            f"allowed: {sorted(PLAN_PLACEHOLDERS)}")
+    for key, allowed in (("test_command", {"tests"}), ("conformance_command", {"expression"}),
+                         ("gate_command", set())):
+        if cfg[key] is None:
+            continue
+        extra = sorted(_template_names(cfg[key], f"{where}: '{key}'") - allowed)
+        if extra:
+            raise PlanJsonError(f"{where}: '{key}' has unknown placeholders {extra}")
+    if cfg["conformance_command"] is not None and "{expression}" not in cfg["conformance_command"]:
+        raise PlanJsonError(f"{where}: 'conformance_command' must contain {{expression}}")
+    for name in cfg["fixture_names"]:
+        extra = sorted(_template_names(name, f"{where}: 'fixture_names'") - {"ext"})
+        if extra:
+            raise PlanJsonError(f"{where}: fixture name {name!r} has unknown placeholders {extra}")
+    return cfg
+
+
+def split_table_row(line):
+    """Cells of a Markdown table row. Escaped pipes and pipes inside code spans
+    do not split; inline code is kept as written."""
+    s = line.strip()
+    if s.startswith("|"):
+        s = s[1:]
+    cells, cur, i, tick = [], [], 0, 0
+    while i < len(s):
+        c = s[i]
+        if c == "\\" and i + 1 < len(s) and s[i + 1] == "|":
+            cur.append("|")
+            i += 2
+            continue
+        if c == "`":
+            j = i
+            while j < len(s) and s[j] == "`":
+                j += 1
+            run = j - i
+            if tick == 0:
+                tick = run
+            elif run == tick:
+                tick = 0
+            cur.append(s[i:j])
+            i = j
+            continue
+        if c == "|" and tick == 0:
+            cells.append("".join(cur).strip())
+            cur = []
+        else:
+            cur.append(c)
+        i += 1
+    rest = "".join(cur).strip()
+    if rest:
+        cells.append(rest)
+    return cells
+
+
+def _section(text, heading_re, where, required=True):
+    """Lines after the first heading matching heading_re, up to the next heading
+    of the same or a higher level (and, for tables, the next subsection)."""
+    lines = text.splitlines()
+    for n, line in enumerate(lines):
+        if re.match(heading_re, line):
+            body = []
+            for m in range(n + 1, len(lines)):
+                if re.match(r"^#{1,3} ", lines[m]):
+                    break
+                body.append((m + 1, lines[m]))
+            return body
+    if required:
+        raise PlanJsonError(f"{where}: no section matching {heading_re!r}")
+    return None
+
+
+def _table(body, where):
+    """(header, [(line number, cells)]) of the first table in body."""
+    rows, header = [], None
+    for n, line in body:
+        if not line.strip().startswith("|"):
+            if header is not None:
+                break
+            continue
+        cells = split_table_row(line)
+        if header is None:
+            header = cells
+            continue
+        if all(re.fullmatch(r":?-+:?", c) for c in cells):
+            continue
+        rows.append((n, cells))
+    return header, rows
+
+
+def _tokens(cell):
+    cell = cell.strip()
+    if not cell or cell.lower() == "none":
+        return []
+    out = []
+    for t in cell.split(","):
+        t = t.strip()
+        if len(t) >= 2 and t.startswith("`") and t.endswith("`"):
+            t = t[1:-1].strip()
+        if t:
+            out.append(t)
+    return out
+
+
+def _expand_path(path, cfg):
+    path = path.strip()
+    if path.startswith(PLAN_TOP) or path in cfg["root_files"] or not cfg["package_path"]:
+        return path
+    return cfg["package_path"] + path
+
+
+def _scope(files, cfg, where):
+    out = []
+    for f in re.findall(r"`([^`]+)`", files):
+        if f.endswith("/*"):
+            base = _expand_path(f[:-2], cfg)
+            if not cfg["fixture_names"]:
+                raise PlanJsonError(f"{where}: {f} needs 'fixture_names' in the configuration")
+            ext = cfg["fixture_extensions"].get(base, "json")
+            out += [f"{base}/{n.format(ext=ext)}" for n in cfg["fixture_names"]]
+        else:
+            out.append(_expand_path(f, cfg))
+    return out
+
+
+def _adapters(files, cfg):
+    folder = cfg["adapter_folder"]
+    if not folder:
+        return []
+    found = []
+    for f in files:
+        m = re.fullmatch(re.escape(folder) + r"/(\w+)\.py", f)
+        if not m:
+            continue
+        name = m.group(1)
+        if name.startswith("__") or name in cfg["adapter_exclude"]:
+            continue
+        found.append(name)
+    return found
+
+
+def parse_plan(text, cfg, milestone=None, where="plan"):
+    """Parse the '## 2. Tasks' table and the section 2.2 clarifications.
+    Returns (rows, clarifications) where rows keeps every unfinished task of the
+    selected milestone, in table order, with dependencies on done tasks removed."""
+    body = _section(text, r"^## 2\. Tasks\s*$", where)
+    header, rows = _table(body, where)
+    if header is None:
+        raise PlanJsonError(f"{where}: section '## 2. Tasks' has no table")
+    missing = [c for c in PLAN_COLUMNS if c not in header]
+    if missing:
+        raise PlanJsonError(f"{where}: the task table lacks columns {missing}")
+    unknown = [c for c in header if c not in PLAN_COLUMNS + PLAN_OPTIONAL_COLUMNS]
+    if unknown:
+        raise PlanJsonError(f"{where}: the task table has unknown columns {unknown}")
+    if len(set(header)) != len(header):
+        raise PlanJsonError(f"{where}: the task table repeats a column")
+    tasks = []
+    for n, cells in rows:
+        if len(cells) != len(header):
+            raise PlanJsonError(f"{where}:{n}: row has {len(cells)} cells, the header has {len(header)}")
+        row = dict(zip(header, cells))
+        uid = row["#"]
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9]*-[A-Za-z0-9][A-Za-z0-9._-]*", uid):
+            raise PlanJsonError(f"{where}:{n}: task id {uid!r} is not PREFIX-NUMBER")
+        row["_line"] = n
+        tasks.append(row)
+    seen = set()
+    for row in tasks:
+        if row["#"] in seen:
+            raise PlanJsonError(f"{where}:{row['_line']}: task id {row['#']} appears twice")
+        seen.add(row["#"])
+    done = {r["#"] for r in tasks if r["Status"].strip() == "done"}
+    prefixes = list(dict.fromkeys(r["#"].split("-")[0] for r in tasks))
+    if milestone is None:
+        if len(prefixes) != 1:
+            raise PlanJsonError(f"{where}: the task table has milestones {prefixes}; pick one with --milestone")
+        milestone = prefixes[0]
+    elif milestone not in prefixes:
+        raise PlanJsonError(f"{where}: no task of milestone {milestone} (the table has {prefixes})")
+    selected = []
+    for row in tasks:
+        if row["#"].split("-")[0] != milestone or row["#"] in done:
+            continue
+        deps = row["Depends on"].strip()
+        row["_deps"] = [] if deps in ("none", "") else [
+            d.strip() for d in deps.split(",") if d.strip() and d.strip() not in done]
+        selected.append(row)
+    clar = _section(text, r"^### 2\.2(\s|$)", where, required=False)
+    targets = []
+    if clar:
+        c_header, c_rows = _table(clar, where)
+        for _, cells in c_rows:
+            if cells:
+                targets.append(cells[0].strip())
+    return selected, targets
+
+
+def _resolve_prd(prefix, cfg, root, where):
+    spec = cfg["criterion_prds"].get(prefix)
+    if spec is None:
+        raise PlanJsonError(f"{where}: no 'criterion_prds' entry for criterion prefix {prefix}")
+    if "*" not in spec:
+        return spec
+    import glob
+    best = None
+    for p in glob.glob(os.path.join(root, spec)):
+        m = re.search(r"-v(\d+)(?:\.[^./]+)?$", os.path.basename(p))
+        if m and (best is None or int(m.group(1)) > best[0]):
+            best = (int(m.group(1)), os.path.relpath(p, root).replace(os.sep, "/"))
+    if best is None:
+        raise PlanJsonError(f"{where}: 'criterion_prds' {prefix} = {spec!r} matches no versioned file")
+    return best[1]
+
+
+def build_units(text, cfg, root, plan_rel, milestone=None, where="plan"):
+    rows, targets = parse_plan(text, cfg, milestone, where)
+    units = []
+    for row in rows:
+        uid = row["#"]
+        at = f"{where}:{row['_line']}"
+        risk = row["Risk"].strip()
+        if risk not in PLAN_RISK_TIERS:
+            raise PlanJsonError(f"{at}: risk {risk!r} is not low, medium or high")
+        files = _scope(row["Files (scope)"], cfg, at)
+        adapters = _adapters(files, cfg)
+        if uid in cfg["acceptance_overrides"]:
+            cmds = list(cfg["acceptance_overrides"][uid])
+        else:
+            tests = [f for f in files if f.startswith("tests/") and f.endswith(".py") and "/test_" in f]
+            cmds = [cfg["test_command"].format(tests=" ".join(tests))]
+        if adapters and cfg["conformance_command"]:
+            ids = list(dict.fromkeys(cfg["adapter_ids"].get(a, a) for a in adapters))
+            cmds.append(cfg["conformance_command"].format(expression='"' + " or ".join(ids) + '"'))
+        if cfg["gate_command"]:
+            cmds.append(cfg["gate_command"])
+        is_adapter = bool(adapters)
+        clarified = any(t == uid or t.lower() == "every unit" or (t.lower() == "every adapter unit" and is_adapter)
+                        for t in targets)
+        criteria = row["Criteria"].strip()
+        prds = list(dict.fromkeys(_resolve_prd(i.split("-")[0], cfg, root, at)
+                                  for i in criteria.split(", ") if i))
+        values = {
+            "uid": uid, "plan": plan_rel, "implemented": row["Implements"].replace("`", ""),
+            "note": PLAN_NOTE.format(plan=plan_rel) if clarified else "",
+            "criteria": criteria, "prds": ", ".join(prds), "rules": cfg["rules"],
+        }
+        ud = cfg["unit_defaults"]
+        unit = {
+            "schema_version": "1.0", "id": uid, "title": row["Task"],
+            "description": cfg["description_template"].format(**values),
+            "depends_on": row["_deps"], "scope": {"files": files},
+            "acceptance": {"commands": cmds}, "risk": risk,
+            "capabilities": json.loads(json.dumps(ud["capabilities"])),
+            "routing": {"initial_tier": PLAN_RISK_TIERS[risk], "maximum_tier": 2,
+                        "reviewer_must_differ_from_author": True},
+            "budget": json.loads(json.dumps(ud["budget"])),
+            "rollback": ud["rollback"],
+        }
+        if "Provides" in row:
+            unit["provides"] = _tokens(row["Provides"])
+        if "Requires" in row:
+            unit["requires"] = _tokens(row["Requires"])
+        units.append(unit)
+    return units
+
+
+def plan_json_text(plan_path, milestone=None):
+    """The generated plan JSON text for plan_path, using the project's configuration."""
+    root, cfg_path = find_plan_config(plan_path)
+    cfg = load_plan_config(cfg_path)
+    try:
+        with open(plan_path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError as e:
+        raise PlanJsonError(f"{plan_path}: cannot read ({e.strerror})") from None
+    plan_rel = os.path.relpath(os.path.abspath(plan_path), root).replace(os.sep, "/")
+    units = build_units(text, cfg, root, plan_rel, milestone, plan_rel)
+    return json.dumps({"units": units}, indent=1) + "\n", len(units)
+
+
+def kit_plan_json(plan, out, milestone=None, check=False):
+    try:
+        text, count = plan_json_text(plan, milestone)
+    except PlanJsonError as e:
+        print(f"plan-json: {e}", file=sys.stderr)
+        return 2
+    if check:
+        try:
+            with open(out, encoding="utf-8") as fh:
+                current = fh.read()
+        except OSError:
+            current = None
+        if current == text:
+            return 0
+        print(f"plan-json: {out} is {'missing' if current is None else 'stale'}; "
+              f"regenerate it with ecc-kit plan-json {plan} {out}", file=sys.stderr)
+        return 1
+    parent = os.path.dirname(os.path.abspath(out))
+    os.makedirs(parent, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=parent, prefix=".plan-json.")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        mask = os.umask(0)
+        os.umask(mask)
+        os.chmod(tmp, 0o666 & ~mask)
+        os.replace(tmp, out)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+    print(count, "units")
+    return 0
+
+
 # ------------------------------------------------------------------ main
 def main(argv=None):
     p = argparse.ArgumentParser(prog="ecctools")
@@ -883,6 +1334,15 @@ def main(argv=None):
     k.add_argument("--force", action="store_true")
     sub.add_parser("kit-diff").add_argument("repo")
     sub.add_parser("kit-sync").add_argument("repo")
+    pj = sub.add_parser(
+        "kit-plan-json", prog="ecc-kit plan-json",
+        description="Build ECC plan JSON from a milestone plan's '## 2. Tasks' table, using the "
+                    "project's .orchestration/plan-json.json.")
+    pj.add_argument("plan", help="the milestone plan (Markdown)")
+    pj.add_argument("out", help="the plan JSON to write or check")
+    pj.add_argument("--milestone", help="task id prefix to build, for example M1 (default: the only one)")
+    pj.add_argument("--check", action="store_true",
+                    help="write nothing; exit 1 when OUT is missing or differs from the generated text")
     s = sub.add_parser("snapshot")
     s.add_argument("--root", required=True)
     s.add_argument("--home", default=os.path.expanduser("~"))
@@ -913,6 +1373,8 @@ def main(argv=None):
         return kit_diff(a.repo)
     if a.cmd == "kit-sync":
         return kit_sync(a.repo)
+    if a.cmd == "kit-plan-json":
+        return kit_plan_json(a.plan, a.out, a.milestone, a.check)
     if a.cmd == "snapshot":
         return snapshot(os.path.abspath(a.root), a.home)
     if a.cmd == "restore":

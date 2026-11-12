@@ -1,0 +1,30 @@
+{
+  "repository": "kennylhilljr/research-mcp",
+  "files": {
+    "gen_m0_plan.py.txt": {
+      "revision": "5235c26",
+      "path": "tools/gen_m0_plan.py",
+      "blob_sha": "ce22565eaa9532330fdc02e31498ae55e0487a34"
+    },
+    "5235c26-plan.md": {
+      "revision": "5235c26",
+      "path": "docs/build/M0-plan-v4.md",
+      "blob_sha": "38c93992134564731a709705451856d22858a4bc"
+    },
+    "5235c26-plan.json": {
+      "revision": "5235c26",
+      "path": ".orchestration/plan-m0.json",
+      "blob_sha": "dc6c6b1101bda8720acc298f900a9139403dba36"
+    },
+    "27baf2d-plan.md": {
+      "revision": "27baf2d",
+      "path": "docs/build/M0-plan-v4.md",
+      "blob_sha": "0fd8b2c8f57a2cd10fca7be729dc29a8dd1732e5"
+    },
+    "27baf2d-plan.json": {
+      "revision": "27baf2d",
+      "path": ".orchestration/plan-m0.json",
+      "blob_sha": "badd7297493f62c0ce195c760664b60b340ef240"
+    }
+  }
+}

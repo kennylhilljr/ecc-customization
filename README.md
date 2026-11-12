@@ -33,7 +33,7 @@ flowchart LR
 | [bootstrap.sh](bootstrap.sh) | Ordered macOS installation, restoration and verification steps |
 | [stack.conf](stack.conf) | Tool versions, repository names, paths and Keychain item names |
 | [bin/ecc](bin/ecc) | Finds a project's configuration and delegates to the external orchestrator |
-| [bin/ecc-kit](bin/ecc-kit) | Creates, compares and syncs project templates |
+| [bin/ecc-kit](bin/ecc-kit) | Creates, compares and syncs project templates, and generates milestone plan JSON |
 | [bin/ecc-snapshot](bin/ecc-snapshot) | Captures selected user settings; optionally invokes the external OpenClaw backup tool |
 | [bin/openclaw-gh-app-token](bin/openclaw-gh-app-token) | Prints a GitHub installation token for the `openclaw-ops-assist` App (bash) |
 | [bin/openclaw-gh-command-drain](bin/openclaw-gh-command-drain) | Verifies queued `@openclaw` GitHub commands with the GitHub API and wakes the ops agent ([lib/gh_command_drain.py](lib/gh_command_drain.py)) |
@@ -241,6 +241,50 @@ bin/ecc-kit sync ../my-project
 ```
 
 `diff` shows kit lines as `-` and project lines as `+`. `sync` updates missing files and files whose hashes still match their recorded baseline; it reports locally evolved files for manual reconciliation.
+
+### Generate a milestone plan JSON
+
+`ecc-kit plan-json` turns the task table of a milestone plan into the plan JSON that `ecc create-run` reads, so a project no longer needs its own generator script. The installed `ecc-kit` supplies the command; `ecc-kit new` and `ecc-kit sync` deliver its settings (`.orchestration/plan-json.json`) and a plan template (`.orchestration/PLAN-TEMPLATE.md`) to the project. Sync installs both into existing projects and, as for every kit file, keeps them once the project has edited them. Plan review and linting stay in the orchestrator (`ecc plan-check`, `ecc lint-plan`).
+
+```sh
+cp .orchestration/PLAN-TEMPLATE.md docs/build/M1-plan-v1.md      # then write the real tasks
+ecc-kit plan-json docs/build/M1-plan-v1.md .orchestration/plan-m1.json --milestone M1
+ecc-kit plan-json docs/build/M1-plan-v1.md .orchestration/plan-m1.json --milestone M1 --check
+```
+
+Generation prints the unit count and creates the output's parent folders. It builds the whole text before writing and replaces the output in one step, so invalid input leaves an existing file unchanged (exit 2 with the file, line and problem). `--check` writes nothing; it exits 0 when the output matches the generated text exactly and 1 when it is missing or stale, which is what a project's `tools/ci.sh` should call. The plan path is resolved from the current folder; paths in the settings are relative to the project root.
+
+What the generator reads:
+
+- The first table under `## 2. Tasks`, found by column name: `#`, `Task`, `Criteria`, `Depends on`, `Persona`, `Implements`, `Files (scope)`, `Risk`, `Status`, and optionally `Provides` and `Requires`. The table ends at the next heading. Escaped pipes (`\|`) and pipes inside code spans do not split cells.
+- The milestone is the task id prefix (`M1` in `M1-04`). `--milestone` picks one; without it the table must have exactly one prefix. Rows with status `done` are left out, and dependencies on `done` rows of any milestone are removed.
+- Scope paths are the backticked entries of `Files (scope)`. They are placed under `package_path` unless they start with `src/`, `tests/`, `tools/`, `docs/` or `.github/` or are listed in `root_files`. A trailing `/` is kept (a folder scope). `dir/*` expands to every name in `fixture_names`, with `{ext}` taken from `fixture_extensions` for that expanded folder (default `json`).
+- `Provides` and `Requires` become arrays: comma-separated, surrounding backticks removed, blank or `none` for an empty array. Without the columns the units have neither field.
+- A row of the `### 2.2` table whose first cell is the unit id, `every unit`, or `every adapter unit` (for a unit whose scope holds an adapter module) adds the sentence "PLAN section 2.2 lists clarifications for this unit; they are requirements." to the unit's description.
+
+What it writes for each unit: the description from `description_template`; acceptance commands in this order: `test_command` with the unit's `tests/**/test_*.py` scope files (or the unit's entry in `acceptance_overrides` instead), then `conformance_command` when the scope holds adapter modules, then `gate_command`; the routing tier from the risk (`low` 0, `medium` 1, `high` 2; any other risk is an error); and `capabilities`, `budget` and `rollback` from `unit_defaults`. The JSON uses one-space indentation and ends with a newline.
+
+The settings file `.orchestration/plan-json.json` is found by searching upward from the plan. Unknown keys, wrong types and unknown placeholders are errors; a `$comment` key is ignored. Missing keys take the defaults below.
+
+| Key | Meaning | Default |
+| --- | --- | --- |
+| `package_path` | Folder prepended to scope paths that are not top-level | `""` (no prefix) |
+| `root_files` | Root files kept as written, for example `pyproject.toml` | `[]` |
+| `adapter_folder` | Project-relative folder of source adapter modules; a `.py` file directly in it is an adapter | `null` |
+| `adapter_exclude` | Module names in that folder that are not adapters (`base`, `registry`); `__init__` and other dunder modules never are | `[]` |
+| `adapter_ids` | Module name to conformance test id, where they differ | `{}` |
+| `fixture_names` | Names `dir/*` stands for; `{ext}` is replaced | `[]` |
+| `fixture_extensions` | Expanded fixture folder to the `{ext}` value | `{}` |
+| `criterion_prds` | Criterion prefix to the PRD path, or a glob such as `docs/prd/PRD-platform-v*.md` that picks the highest numeric `-vN` | `{}` |
+| `rules` | Text for `{rules}` | `""` |
+| `description_template` | Unit description; placeholders `{uid}`, `{plan}`, `{implemented}`, `{note}`, `{criteria}`, `{prds}`, `{rules}` (write `{{` and `}}` for literal braces) | a short generic prompt |
+| `test_command` | Test command; `{tests}` is the space-separated test files | `uv run pytest {tests} -q` |
+| `conformance_command` | Conformance command for adapter units; `{expression}` is the adapter ids joined with ` or ` in double quotes, for example `"arxiv or crossref"`, so the orchestrator passes it as one argument | `null` (none) |
+| `gate_command` | Last acceptance command | `tools/ci.sh` |
+| `acceptance_overrides` | Unit id to the commands that replace its test command | `{}` |
+| `unit_defaults` | `capabilities`, `budget` and `rollback` of every unit | network off, no secrets, 2 attempts, 30 minutes, 5 USD, `Revert the commit.` |
+
+[`tests/fixtures/plan_json/research-mcp.config.json`](tests/fixtures/plan_json/research-mcp.config.json) is research-mcp's `tools/gen_m0_plan.py` (at `5235c26`) expressed as settings; the tests check that it reproduces that commit's `.orchestration/plan-m0.json` (18 units) and the empty plan of `27baf2d`. The only difference is the deliberate quoting of the conformance `-k` expression. To adopt the command, research-mcp copies that file to `.orchestration/plan-json.json`, replaces its generator call in `tools/ci.sh` with `ecc-kit plan-json --check docs/build/M1-plan-v6.md .orchestration/plan-m1.json --milestone M1` (and the same for M0), and deletes `tools/gen_m0_plan.py`. This repository does not change research-mcp.
 
 ### Operate an ECC project
 
