@@ -554,7 +554,7 @@ def openclaw_restore(archive, dest):
                 extra = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
                 tar.extractall(tmp, members=members, **extra)
         except (tarfile.TarError, OSError) as exc:
-            print(f"openclaw-restore: cannot read {archive}: {type(exc).__name__}", file=sys.stderr)
+            print(f"openclaw-restore: cannot read or extract {archive}: {type(exc).__name__}", file=sys.stderr)
             return 1
         root = os.path.join(tmp, "openclaw")
         if os.path.islink(root) or not os.path.isdir(root):
