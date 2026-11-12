@@ -1027,8 +1027,35 @@ class DrainTest(unittest.TestCase):
         code, _ = self.run_drain("--dry-run")
         self.assertEqual(code, 0, self.output)
         self.assertIn(f"would replay {name}", self.output)
-        self.assertIn(f"would replay {bad}", self.output)
+        self.assertNotIn(f"would replay {bad}", self.output)
+        self.assertIn(f"{bad} is not a valid command request; would move it to {self.rejected}", self.output)
         self.assertEqual(self.snapshot(), before)
+
+    def test_failed_request_dry_run_reports_unreadable(self):
+        name = self.write_failed()
+        path = os.path.join(self.root, name)
+        os.chmod(path, 0)
+        try:
+            before = self.snapshot_without(path)
+            code, _ = self.run_drain("--dry-run")
+            after = self.snapshot_without(path)
+        finally:
+            os.chmod(path, 0o600)
+        self.assertEqual(code, 1)
+        self.assertIn(f"could not read {name}", self.output)
+        self.assertNotIn(f"would replay {name}", self.output)
+        self.assertEqual(after, before)
+
+    def snapshot_without(self, path):
+        """snapshot() of everything but one unreadable file, whose type, mode and mtime are compared."""
+        st = os.lstat(path)
+        os.chmod(path, 0o600)
+        try:
+            snap = self.snapshot()
+        finally:
+            os.chmod(path, 0)
+        snap[path] = (snap[path][0], st.st_mode, st.st_mtime_ns)
+        return snap
 
     def test_request_written_during_replay_waits_for_next_run(self):
         first = self.write_failed()

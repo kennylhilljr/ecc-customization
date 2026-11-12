@@ -740,9 +740,7 @@ def replay_request_file(root, qdir, path, dry_run):
             log(f"replay: could not move {path.name} ({e.strerror or e}); leaving it for the next run")
             return False
         return True
-    if dry_run:
-        log(f"replay: would replay {path.name}")
-        return True
+    # A dry run reads and validates too (reading changes nothing), so its preview matches a real run.
     try:
         text = read_regular(path)
     except FileNotFoundError:
@@ -755,12 +753,18 @@ def replay_request_file(root, qdir, path, dry_run):
     except ValueError:
         ev = None
     if ev is None:
-        log(f"replay: {path.name} is not a valid command request; moving it to {rejected}")
+        log(f"replay: {path.name} is not a valid command request; {'would move' if dry_run else 'moving'} it "
+            f"to {rejected}")
+        if dry_run:
+            return True
         try:
             move_into(path, rejected)
         except OSError as e:
             log(f"replay: could not move {path.name} ({e.strerror or e}); leaving it for the next run")
             return False
+        return True
+    if dry_run:
+        log(f"replay: would replay {path.name}")
         return True
     try:
         publish_event(root, qdir, ev)

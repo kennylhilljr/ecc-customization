@@ -549,7 +549,7 @@ test("a command request that cannot be published is saved as an ops-failed-<UUID
       command: async () => {
         throw new Error("a");
       },
-      failed: async () => {
+      saveFailedCommand: async () => {
         throw new Error("b");
       },
     });

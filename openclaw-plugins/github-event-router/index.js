@@ -60,7 +60,7 @@ export function createHandler(
     write = writeEvent,
     sweep = writeSweep,
     command = writeCommand,
-    failed = writeFailedCommand,
+    saveFailedCommand = writeFailedCommand,
     unparsed = recordUnparsed,
     now = () => new Date(),
     senderLog,
@@ -131,7 +131,7 @@ export function createHandler(
       } catch (err) {
         // Keep the request: the drain publishes each ops-failed-<UUID>.json into ops/.
         try {
-          const saved = await failed(cfg.queueRoot, record);
+          const saved = await saveFailedCommand(cfg.queueRoot, record);
           logger?.error?.(`${PLUGIN_ID}: could not write command request (${errText(err)}); saved it to ${path.basename(String(saved))} for the drain to replay`);
         } catch (err2) {
           logger?.error?.(`${PLUGIN_ID}: could not write command request (${errText(err)}) or save it as a failed-request file (${errText(err2)}); it is lost`);

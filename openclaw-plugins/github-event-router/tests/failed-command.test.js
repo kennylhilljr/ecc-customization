@@ -174,7 +174,7 @@ test("a failed fallback write is logged, the request is lost and the post is sti
       command: async () => {
         throw new Error("a");
       },
-      failed: async () => {
+      saveFailedCommand: async () => {
         throw new Error("b");
       },
     });
