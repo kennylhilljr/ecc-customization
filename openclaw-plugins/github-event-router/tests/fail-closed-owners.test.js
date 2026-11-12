@@ -134,6 +134,17 @@ test("resolveOwnerIds: an explicit list overrides allowFrom; malformed lists and
   }
 });
 
+test("ownerSenderIds holds at most the manifest's maxItems entries, in parseConfig and the fail-closed hook", async () => {
+  const max = manifest.configSchema.properties.ownerSenderIds.maxItems;
+  assert.equal(max, 16);
+  const ids = Array.from({ length: max + 1 }, (_, i) => `U0OWNER${String(i).padStart(3, "0")}`);
+  assert.deepEqual(parseConfig({ ownerSenderIds: ids.slice(0, max) }).ownerSenderIds, ids.slice(0, max));
+  assert.throws(() => parseConfig({ ownerSenderIds: ids }), ConfigError);
+  const { hook, errors } = registerHook({ queueRoot: "relative", ownerSenderIds: ids });
+  assert.equal(errors.length, 1);
+  for (const id of [ids[0], ids[max], ALLOW_FROM]) assert.deepEqual(await hook(...from(id)), { handled: true }, id);
+});
+
 test("bad config fails closed but keeps an explicit owner that differs from allowFrom", async () => {
   const { hook, errors } = registerHook({ queueRoot: "relative", botSenderIds: ["B07GITHUBAPP"], ownerSenderIds: [EXPLICIT] });
   assert.match(errors[0], /queueRoot must be an absolute path/);

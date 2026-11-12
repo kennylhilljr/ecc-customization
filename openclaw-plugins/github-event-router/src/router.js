@@ -23,6 +23,8 @@ export class ConfigError extends Error {}
 // agree. A wildcard grants nobody owner status here.
 export const OWNER_ID_PATTERN = "^\\s*(?:[Ss][Ll][Aa][Cc][Kk]:)?(?:[Uu][Ss][Ee][Rr]:)?[UW][A-Z0-9]{6,}\\s*$";
 const OWNER_ID_RE = new RegExp(OWNER_ID_PATTERN, "u");
+// openclaw.plugin.json caps ownerSenderIds at the same number (maxItems).
+export const OWNER_IDS_MAX = 16;
 
 /** The bare user id an owner entry stands for, or null when it is not one. */
 export function normalizeOwnerId(entry) {
@@ -45,7 +47,7 @@ export function ownerIdsFrom(list) {
 /**
  * The owner ids for this plugin, independent of the rest of its config.
  * ownerSenderIds, when present (even empty), replaces channels.slack.allowFrom.
- * It must be a list of owner entries naming each id once; anything else
+ * It must be a list of at most 16 owner entries naming each id once; anything else
  * throws ConfigError, and callers then grant no owner exemption.
  *
  * @param raw plugins.entries.github-event-router.config
@@ -55,6 +57,7 @@ export function resolveOwnerIds(raw, openclawConfig) {
   const cfg = raw && typeof raw === "object" ? raw : {};
   if (cfg.ownerSenderIds === undefined) return ownerIdsFrom(openclawConfig?.channels?.slack?.allowFrom);
   if (!Array.isArray(cfg.ownerSenderIds)) throw new ConfigError("ownerSenderIds must be a list of Slack user ids");
+  if (cfg.ownerSenderIds.length > OWNER_IDS_MAX) throw new ConfigError(`ownerSenderIds may list at most ${OWNER_IDS_MAX} ids`);
   const ids = [];
   for (const entry of cfg.ownerSenderIds) {
     const id = normalizeOwnerId(entry);
