@@ -986,6 +986,9 @@ def load_plan_config(path):
         if key in ud:
             if not isinstance(ud[key], dict):
                 raise PlanJsonError(f"{where}: 'unit_defaults.{key}' must be an object")
+            bad = sorted(set(ud[key]) - set(merged[key]))
+            if bad:
+                raise PlanJsonError(f"{where}: unknown keys in 'unit_defaults.{key}': {bad}")
             merged[key].update(ud[key])
     if "rollback" in ud:
         merged["rollback"] = ud["rollback"]
@@ -997,7 +1000,7 @@ def load_plan_config(path):
         if not isinstance(budget.get(key), int) or isinstance(budget.get(key), bool) or budget[key] < 1:
             raise PlanJsonError(f"{where}: 'unit_defaults.budget.{key}' must be a positive integer")
     cost = budget.get("maximum_cost_usd")
-    if not isinstance(cost, (int, float)) or isinstance(cost, bool) or cost <= 0:
+    if not isinstance(cost, (int, float)) or isinstance(cost, bool) or not 0 < cost < float("inf"):
         raise PlanJsonError(f"{where}: 'unit_defaults.budget.maximum_cost_usd' must be a positive number")
     if not isinstance(merged["rollback"], str):
         raise PlanJsonError(f"{where}: 'unit_defaults.rollback' must be a string")
