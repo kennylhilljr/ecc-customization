@@ -74,7 +74,12 @@ def secret_kind(s):
 
 
 def scan_paths(paths):
-    """[(path, line, kind)] for every file under paths."""
+    """[(path, line, kind)] for every file under paths.
+
+    Symlinks met while walking a directory are skipped, and .git folders are
+    not entered. A path given directly is scanned even when it is a symlink to
+    a file, because the caller asked for that path. Files that are not UTF-8
+    text are skipped."""
     hits = []
     for top in paths:
         for path in _walk_files(top):
@@ -534,22 +539,32 @@ def openclaw_restore(archive, dest):
             return 1
     os.makedirs(os.path.dirname(dest), exist_ok=True)
     tmp = tempfile.mkdtemp(prefix=".openclaw-restore-", dir=os.path.dirname(dest))
-    with tarfile.open(archive, "r:gz") as tar:
-        members = []
-        for m in tar.getmembers():
-            name = m.name
-            if not (m.isfile() or m.isdir()) or name.startswith("/") or ".." in name.split("/"):
-                print(f"openclaw-restore: refusing archive member {name!r}", file=sys.stderr)
-                shutil.rmtree(tmp)
-                return 1
-            if not (name == "openclaw" or name.startswith("openclaw/")):
-                continue
-            members.append(m)
-        extra = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
-        tar.extractall(tmp, members=members, **extra)
-    os.chmod(os.path.join(tmp, "openclaw"), 0o700)
-    os.rename(os.path.join(tmp, "openclaw"), dest)
-    shutil.rmtree(tmp, ignore_errors=True)
+    try:
+        try:
+            with tarfile.open(archive, "r:gz") as tar:
+                members = []
+                for m in tar.getmembers():
+                    name = m.name
+                    if not (m.isfile() or m.isdir()) or name.startswith("/") or ".." in name.split("/"):
+                        print(f"openclaw-restore: refusing archive member {name!r}", file=sys.stderr)
+                        return 1
+                    if not (name == "openclaw" or name.startswith("openclaw/")):
+                        continue
+                    members.append(m)
+                extra = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
+                tar.extractall(tmp, members=members, **extra)
+        except (tarfile.TarError, OSError) as exc:
+            print(f"openclaw-restore: cannot read {archive}: {type(exc).__name__}", file=sys.stderr)
+            return 1
+        root = os.path.join(tmp, "openclaw")
+        if os.path.islink(root) or not os.path.isdir(root):
+            print("openclaw-restore: archive has no openclaw directory at its top level; "
+                  "nothing restored", file=sys.stderr)
+            return 1
+        os.chmod(root, 0o700)
+        os.rename(root, dest)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
     print(f"openclaw-restore: {len(members)} entries restored to {dest}")
     return 0
 

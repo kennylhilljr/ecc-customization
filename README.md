@@ -40,7 +40,7 @@ flowchart LR
 | [openclaw-plugins/github-event-router/](openclaw-plugins/github-event-router/README.md) | OpenClaw plugin that queues GitHub Slack app posts for issue-worker-bots and pr-review-bots; installed by hand, not by `bootstrap.sh` |
 | [machine/ops/](machine/ops/workspace-ops.settings.json) | Tracked Claude Code settings for the OpenClaw ops agent, merged by the `ops` step |
 | [machine/launchd/](machine/launchd/com.kennylhilljr.openclaw-gh-command.plist) | Hand-maintained launchd job for the command drain; installed by hand, not by `bootstrap.sh` |
-| [tests/](tests/) | `unittest` tests for the `ops` step, the settings merge, the token command and the command drain |
+| [tests/](tests/) | `unittest` tests for the `ops` step, the settings merge, the token command, the command drain, the secret scan and scrubbing, the kit commands, `restore --dry-run` and `openclaw-restore`, plus the `run_temp_matrix.py` runner |
 | [lib/ecctools.py](lib/ecctools.py) | Python helpers for templates, snapshots, restores, plugin registration and secret scanning |
 | [kit/](kit/) | Agent instructions, build/review skills, lessons ledger and orchestration templates |
 | [skills/](skills/README.md) | Shared ECC operation and EARS notation skills |
@@ -284,7 +284,7 @@ For full OpenClaw state, `bin/ecc-snapshot --openclaw` additionally invokes the 
 ./bootstrap.sh --openclaw-archive /path/to/openclaw-state.tar.gz
 ```
 
-The Python restore refuses an existing destination and unsafe archive members. It verifies SHA-256 **only when** a sibling `manifest.json` supplies `archive_sha256`; a missing checksum is not an integrity guarantee. See [REDEPLOY.md](docs/REDEPLOY.md) for the complete migration procedure.
+The Python restore refuses an existing destination and unsafe archive members (absolute paths, `..` parts, links and devices). The archive must hold an `openclaw` directory at its top level; an archive without one, or with a regular file named `openclaw`, is refused with exit 1 and no destination is created. Extraction happens in a `.openclaw-restore-*` staging folder beside the destination, which is removed whether the restore succeeds or fails. The restored folder gets mode 0700. It verifies SHA-256 **only when** a sibling `manifest.json` supplies `archive_sha256`; a missing checksum is not an integrity guarantee. See [REDEPLOY.md](docs/REDEPLOY.md) for the complete migration procedure.
 
 ## Testing
 
@@ -296,7 +296,15 @@ python3 tests/test_ecc_operator.py
 
 Kenny can install the check workflow using the YAML and instructions in [docs/ci.md](docs/ci.md).
 
-There is no CI workflow or coverage report. `tests/` holds `unittest` tests for the `ops` step, `merge-settings`, `openclaw-gh-app-token`, `openclaw-gh-command-drain` (`tests/test_gh_command_drain.py`) and the check runner. They use temporary home folders, fake `security`, `curl`, token and `openclaw` commands and a fake GitHub API, so they need neither the Keychain nor the network. Run the repository checks with Bash, a POSIX shell, Git, OpenSSL, Python 3.9 or newer, Node 22 or newer and npm. The runner finds the repository from its own path, including when called from another directory or from a checkout path containing spaces.
+There is no CI workflow or coverage report. `tests/` holds `unittest` tests for the `ops` step, `merge-settings`, `openclaw-gh-app-token`, `openclaw-gh-command-drain` (`tests/test_gh_command_drain.py`) and the check runner, and for these `lib/ecctools.py` helpers:
+
+- `test_scan.py`: every token shape, the long opaque string rule (hex SHAs and single-case strings are not flagged), line numbers, skipped `.git` folders, skipped symlinks met during a folder walk, skipped binary files and the `scan` CLI output and exit codes. A symlink passed directly to `scan` is still scanned.
+- `test_scrubbing.py`: what `scrub_json` and `scrub_toml` remove and report. In JSON, harmless `SAFE_KEYS` values and booleans or `null` under secret-named keys are kept. TOML scrubbing is stricter: it also drops `authType` and secret-named booleans.
+- `test_kit.py`: `kit-new` output for every kit template, the `.agents/kit.json` record, the `.claude/skills` link, `.gitignore` entries, unknown placeholders, `kit-diff` and `kit-sync`.
+- `test_restore.py`: `restore --dry-run` writes nothing, with or without `--overwrite`.
+- `test_openclaw_restore.py`: `openclaw-restore` success, refused members, checksum checks, archives without an `openclaw` directory and staging cleanup.
+
+They use temporary home folders, fake `security`, `curl`, token and `openclaw` commands and a fake GitHub API, so they need neither the Keychain nor the network. Fake secret values are assembled at runtime so the test sources pass the scan. Run the repository checks with Bash, a POSIX shell, Git, OpenSSL, Python 3.9 or newer, Node 22 or newer and npm. The runner finds the repository from its own path, including when called from another directory or from a checkout path containing spaces.
 
 ```sh
 sh scripts/check.sh
@@ -315,6 +323,14 @@ sh scripts/check.sh
 - `diff-check`: check the working tree diff for whitespace errors.
 
 The runner creates temporary storage from the explicit `/tmp/ecc-check.XXXXXX` template instead of trusting an inherited `TMPDIR`. It disables Python bytecode writes, places the npm cache inside that storage, and removes the storage on normal exit or a catchable termination signal. Every check gets a status line even after an earlier failure. The final exit is 1 when any check failed and 0 otherwise. `plist-lint` prints `SKIP` with an explanation only when `plutil` is absent; an installed `plutil` that returns nonzero produces `FAIL`. Missing scripts and failed prerequisites are not skipped.
+
+To check that the suite does not depend on the temporary folder location, run it under a disposable `HOME` with `TMPDIR=/tmp` and with `TMPDIR` set to that home's nested `.openclaw/tmp`. Run it with the system Python too, which checks Python 3.9 compatibility on macOS:
+
+```sh
+python3 -B tests/run_temp_matrix.py
+/usr/bin/python3 -B -m unittest discover -s tests
+/usr/bin/python3 -B tests/run_temp_matrix.py
+```
 
 The scan returns `0` with no output when it finds no recognized patterns, or `1` with file/line/kind findings. These checks validate syntax and basic CLI entry points; they do not test macOS installation, provider authentication, external runtime behavior or background jobs. Test behavior changes with temporary destinations and fake data, never real credentials or personal settings.
 
