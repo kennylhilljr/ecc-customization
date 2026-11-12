@@ -27,14 +27,22 @@ before failing; only a run that could not be started at all clears it.
 Such a run also sends a short alert to Slack with `openclaw message send`;
 a failed alert is only logged.
 
-Only comments created from 15 minutes before to 2 minutes after the event's
-received_at count, and "@openclaw" must be a whole handle (MENTION, the same
-pattern the router uses). Each run first replays the router's failed-request
-journal (ops-failed.jsonl next to the queue) into the queue.
+Only comments last updated (reviews: submitted) from 15 minutes before to 2
+minutes after the event's received_at count, so an old comment edited to add a
+command counts and a body edited after the window does not; a comment without
+a valid updated_at is skipped. "@openclaw" must be a whole handle (MENTION,
+the same pattern the router uses). Each run first publishes the router's failed command
+requests (ops-failed-<UUID>.json files next to the queue, and the older
+ops-failed.jsonl journal) into the queue.
 
 Before the first agent run of a drain run, `openclaw health` checks that the
 local Gateway answers. If it does not, no pending entry is written, the agent
 is not started, and the event is deferred.
+
+--dry-run logs what a run would do without starting the agent and without
+creating or changing any drain file (queue, deferred, rejected, failed-request,
+state or drain.lock); it does not take the lock, so it also previews while a
+real run holds it. It still calls the token command and the GitHub API.
 
 Exit codes: 0 when every event was handled (or there was nothing to do, or
 another run holds the lock), 1 when an event was deferred or given up on, 2
@@ -42,6 +50,7 @@ when the queue directory is refused. Standard library only; Python 3.9+. The
 GitHub token is never printed or logged.
 """
 import argparse
+import contextlib
 import fcntl
 import json
 import os
@@ -71,9 +80,11 @@ AGENT_TIMEOUT = 600          # passed to `openclaw agent --timeout`
 AGENT_KILL_AFTER = 660       # subprocess timeout, a bit above the agent's own
 TOKEN_TIMEOUT = 60
 HTTP_TIMEOUT = 30
-WINDOW = timedelta(minutes=15)   # comments created this long before received_at still count
+WINDOW = timedelta(minutes=15)   # comments written (comment_time) this long before received_at still count
 AFTER_RECEIVED = timedelta(minutes=2)   # and up to this long after it (clock skew, Slack delay)
-FAILED_JOURNAL = "ops-failed.jsonl"     # command requests the router could not publish
+# command requests the router could not publish: one ops-failed-<UUID>.json file each in the queue root
+FAILED_REQUEST = re.compile(r"^ops-failed-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.json$")
+FAILED_JOURNAL = "ops-failed.jsonl"     # the older router's shared journal, still replayed
 REPLAYING = re.compile(r"^\.ops-failed\.replaying-[A-Za-z0-9_-]+\.jsonl$")
 MAX_ATTEMPTS = 24            # deferrals before an event file is given up on and rejected
 QUEUE_SETTLE = 30            # seconds an unparsable file is left alone in case it is still being written
@@ -276,7 +287,7 @@ def utcnow():
 
 def load_state(path, dry_run, now=None):
     """The state, keyed by lower-case repository: "delivered" maps each "<source>:<id>" key sent to
-    the agent to {"time": the comment's created_at or submitted_at}, and "pending" maps the keys whose
+    the agent to {"time": the comment's updated_at (a review's submitted_at) when it was picked}, and "pending" maps the keys whose
     agent run started but was never recorded as finished to their start time and URL.
 
     Delivered keys older than DELIVERED_KEEP are dropped; the WINDOW check already excludes those
@@ -345,10 +356,10 @@ def clear_pending(state, repo, key):
         state["pending"].pop(repo, None)
 
 
-def mark_delivered(state, repo, source, cid, created):
+def mark_delivered(state, repo, source, cid, written):
     key = f"{source}:{cid}"
     clear_pending(state, repo, key)
-    state["delivered"].setdefault(repo, {})[key] = {"time": iso(created)}
+    state["delivered"].setdefault(repo, {})[key] = {"time": iso(written)}
 
 
 # ---------------------------------------------------------------- GitHub
@@ -463,9 +474,17 @@ class GitHub:
         return out
 
 
+def comment_time(source, c):
+    """The time a comment's current body was written: submitted_at for a review, updated_at for an issue or
+    review comment (equal to created_at when it was never edited). None when that field is missing or
+    invalid; created_at is never used instead, since an edit after the event could then run unseen."""
+    return parse_time(c.get("submitted_at" if source == REVIEW else "updated_at"))
+
+
 def select(comments, repo, window_start, window_end, state):
-    """Trusted @openclaw comments created in [window_start, window_end] and not yet delivered, oldest first.
-    comments holds (source, comment) pairs. Each item is (time, source, id, repo, number, html_url, body)."""
+    """Trusted @openclaw comments whose body was written (comment_time) in [window_start, window_end] and not
+    yet delivered, oldest first. comments holds (source, comment) pairs. Each item is
+    (time, source, id, repo, number, html_url, body)."""
     picked = {}
     for source, c in comments:
         user, cid, body = c.get("user"), c.get("id"), c.get("body")
@@ -475,8 +494,8 @@ def select(comments, repo, window_start, window_end, state):
             continue
         if not MENTION.search(body):
             continue
-        created = parse_time(c.get("submitted_at" if source == REVIEW else "created_at"))
-        if created is None or not window_start <= created <= window_end:
+        written = comment_time(source, c)
+        if written is None or not window_start <= written <= window_end:
             continue
         if source == ISSUE_COMMENT:
             m = ISSUE_URL_NUMBER.search(str(c.get("issue_url", "")))
@@ -487,7 +506,7 @@ def select(comments, repo, window_start, window_end, state):
             continue
         if already_handled(state, repo.lower(), source, cid):
             continue
-        picked[(source, cid)] = (created, source, cid, repo, int(m.group(1)), url, body)
+        picked[(source, cid)] = (written, source, cid, repo, int(m.group(1)), url, body)
     return sorted(picked.values(), key=lambda item: item[:3])
 
 
@@ -579,7 +598,7 @@ def send_alert(url, detail, run):
         log(f"alert: openclaw message send exited {r.returncode}")
 
 
-# ---------------------------------------------------------------- failed-request journal
+# ---------------------------------------------------------------- failed command requests
 
 def compact_timestamp(iso_text):
     """The router's file name prefix: 2026-11-03T14:15:02.123Z -> 20261103T141502123Z."""
@@ -687,10 +706,89 @@ def replay_one(root, qdir, path):
     return True
 
 
+def remove_source(path):
+    """Delete a replayed request file. Tests replace this to simulate a failure."""
+    os.unlink(path)
+
+
+def read_regular(path):
+    """The text of path, refusing a symlink (O_NOFOLLOW) and anything that is not a regular file once
+    opened, so a swapped-in link or FIFO is never followed or waited on."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
+    with os.fdopen(fd, "rb") as fh:
+        if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
+            raise OSError(f"{path.name} is not a regular file")
+        return fh.read().decode("utf-8")
+
+
+def replay_request_file(root, qdir, path, dry_run):
+    """Publish one ops-failed-<UUID>.json request into qdir and delete it, or move it to ops-rejected when it
+    is not a regular file or not exactly one valid command object. True when done; on any failure the file
+    stays (or, after publishing, is published again by the next run, which is harmless)."""
+    rejected = sibling(qdir, "rejected")
+    try:
+        mode = os.lstat(path).st_mode
+    except FileNotFoundError:
+        return True
+    if not stat.S_ISREG(mode):
+        log(f"replay: {path.name} is not a regular file; {'would move' if dry_run else 'moving'} it to {rejected}")
+        if dry_run:
+            return True
+        try:
+            move_into(path, rejected)  # one os.replace: a symlink moves as a link, its target is never read
+        except OSError as e:
+            log(f"replay: could not move {path.name} ({e.strerror or e}); leaving it for the next run")
+            return False
+        return True
+    # A dry run reads and validates too (reading changes nothing), so its preview matches a real run.
+    try:
+        text = read_regular(path)
+    except FileNotFoundError:
+        return True
+    except (OSError, UnicodeDecodeError) as e:
+        log(f"replay: could not read {path.name} ({getattr(e, 'strerror', None) or e}); leaving it for the next run")
+        return False
+    try:
+        ev = validate_event(json.loads(text))
+    except ValueError:
+        ev = None
+    if ev is None:
+        log(f"replay: {path.name} is not a valid command request; {'would move' if dry_run else 'moving'} it "
+            f"to {rejected}")
+        if dry_run:
+            return True
+        try:
+            move_into(path, rejected)
+        except OSError as e:
+            log(f"replay: could not move {path.name} ({e.strerror or e}); leaving it for the next run")
+            return False
+        return True
+    if dry_run:
+        log(f"replay: would replay {path.name}")
+        return True
+    try:
+        publish_event(root, qdir, ev)
+    except OSError as e:
+        log(f"replay: could not publish {path.name} ({e.strerror or e}); leaving it for the next run")
+        return False
+    try:
+        remove_source(path)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        log(f"replay: published {path.name} but could not remove it ({e.strerror or e}); the next run "
+            f"publishes it again (repeats are harmless)")
+        return False
+    log(f"replay: published {path.name}")
+    return True
+
+
 def replay_failed(qdir, dry_run):
-    """Turn the router's failed-request journal back into queue events. The journal is renamed first, so
-    the router's later appends start a fresh file and are never lost; leftovers from an earlier run that
-    did not finish are replayed too. Returns False when something is left for the next run."""
+    """Turn the router's failed command requests back into queue events. Each ops-failed-<UUID>.json file in
+    the queue root is one request; only the names listed at the start are touched, so a request the router
+    writes meanwhile waits for the next run. The older router's shared journal (ops-failed.jsonl) is still
+    replayed: it is renamed first, so appends made meanwhile start a fresh file, and leftovers from an earlier
+    run that did not finish are replayed too. Returns False when something is left for the next run."""
     root = qdir.parent
     journal = root / FAILED_JOURNAL
     try:
@@ -723,6 +821,9 @@ def replay_failed(qdir, dry_run):
         names = []
     for name in names:
         path = root / name
+        if FAILED_REQUEST.match(name):
+            ok = replay_request_file(root, qdir, path, dry_run) and ok
+            continue
         if not REPLAYING.match(name):
             continue
         try:
@@ -824,7 +925,7 @@ def drain(qdir, dry_run, gh, run, now):
             continue
         picked.sort(key=lambda item: item[:3])
         ok, why = True, ""
-        for created, source, cid, repo, number, url, body in picked:
+        for written, source, cid, repo, number, url, body in picked:
             key, rkey = f"{source}:{cid}", repo.lower()
             pending = state["pending"].get(rkey, {}).get(key)
             if pending is not None:
@@ -865,7 +966,7 @@ def drain(qdir, dry_run, gh, run, now):
                 send_alert(url, detail, run)
                 ok, why = False, "ops agent run failed or timed out"
                 break
-            mark_delivered(state, rkey, source, cid, created)
+            mark_delivered(state, rkey, source, cid, written)
             try:
                 write_json_atomic(state_path, state)
             except OSError as e:
@@ -894,13 +995,18 @@ def main(argv=None, http_get=None, run=None):
     ap = argparse.ArgumentParser(prog="openclaw-gh-command-drain",
                                  description="Verify queued @openclaw GitHub commands and wake the ops agent.")
     ap.add_argument("--queue", default=None, help="queue directory (default ~/.local/state/github-events/ops)")
-    ap.add_argument("--dry-run", action="store_true", help="read and log only: no agent runs, moves or state writes")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="read and log only: no agent runs, and no drain file (queue, deferred, rejected, "
+                         "failed-request, state or lock file) is created or changed; the lock is not taken. "
+                         "Previews still call the token command and the GitHub API")
     ap.add_argument("--retry-pending", action="store_true",
                     help="clear pending entries left by runs that never finished, so those comments can be "
                          "delivered by a later event")
     args = ap.parse_args(argv)
     run = run or subprocess.run
-    held = lock(state_dir())
+    # A dry run writes nothing, so it needs no lock: it neither creates the state folder nor opens (and so
+    # truncates) drain.lock, and it can preview while a real run holds the lock.
+    held = contextlib.nullcontext() if args.dry_run else lock(state_dir())
     if held is None:
         log("another drain run holds the lock; leaving the queue for the next run")
         return 0

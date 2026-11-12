@@ -16,15 +16,56 @@ export const OPENCLAW_MENTION = /(?<![A-Za-z0-9_.+-])@openclaw(?![A-Za-z0-9_-])(
 
 export class ConfigError extends Error {}
 
-// Slack allowFrom entries may be plain ids or prefixed ("slack:U…", "user:U…").
-// A wildcard grants nobody owner status here.
+// An owner entry is a Slack user id (U or W, upper case), optionally prefixed,
+// in any case, with "slack:", "user:" or "slack:user:", with optional
+// whitespace around it. openclaw.plugin.json uses this same pattern for
+// ownerSenderIds items; tests/fail-closed-owners.test.js checks that the two
+// agree. A wildcard grants nobody owner status here.
+export const OWNER_ID_PATTERN = "^\\s*(?:[Ss][Ll][Aa][Cc][Kk]:)?(?:[Uu][Ss][Ee][Rr]:)?[UW][A-Z0-9]{6,}\\s*$";
+const OWNER_ID_RE = new RegExp(OWNER_ID_PATTERN, "u");
+// openclaw.plugin.json caps ownerSenderIds at the same number (maxItems).
+export const OWNER_IDS_MAX = 16;
+
+/** The bare user id an owner entry stands for, or null when it is not one. */
+export function normalizeOwnerId(entry) {
+  if (typeof entry !== "string" || !OWNER_ID_RE.test(entry)) return null;
+  return entry.trim().replace(/^(?:slack:)?(?:user:)?/i, "");
+}
+
+// Slack allowFrom is OpenClaw's own setting and may hold other entries
+// ("*", channel ids): keep the user ids, skip the rest, drop duplicates.
 export function ownerIdsFrom(list) {
   if (!Array.isArray(list)) return [];
   const ids = [];
   for (const entry of list) {
-    if (typeof entry !== "string") continue;
-    const id = entry.trim().replace(/^(?:slack:)?(?:user:)?/i, "");
-    if (/^[UW][A-Z0-9]{6,}$/.test(id) && !ids.includes(id)) ids.push(id);
+    const id = normalizeOwnerId(entry);
+    if (id !== null && !ids.includes(id)) ids.push(id);
+  }
+  return ids;
+}
+
+/**
+ * The owner ids for this plugin, independent of the rest of its config.
+ * ownerSenderIds, when present (even empty), replaces channels.slack.allowFrom.
+ * It must be a list of at most 16 owner entries naming each id once; anything else
+ * throws ConfigError, and callers then grant no owner exemption.
+ *
+ * @param raw plugins.entries.github-event-router.config
+ * @param openclawConfig the full OpenClaw config (api.config)
+ */
+export function resolveOwnerIds(raw, openclawConfig) {
+  const cfg = raw && typeof raw === "object" ? raw : {};
+  if (cfg.ownerSenderIds === undefined) return ownerIdsFrom(openclawConfig?.channels?.slack?.allowFrom);
+  if (!Array.isArray(cfg.ownerSenderIds)) throw new ConfigError("ownerSenderIds must be a list of Slack user ids");
+  if (cfg.ownerSenderIds.length > OWNER_IDS_MAX) throw new ConfigError(`ownerSenderIds may list at most ${OWNER_IDS_MAX} ids`);
+  const ids = [];
+  for (const entry of cfg.ownerSenderIds) {
+    const id = normalizeOwnerId(entry);
+    if (id === null) {
+      throw new ConfigError("ownerSenderIds must be a list of Slack user ids such as U0ADXF02M4K, optionally prefixed with slack:, user: or slack:user:");
+    }
+    if (ids.includes(id)) throw new ConfigError(`ownerSenderIds names ${id} more than once`);
+    ids.push(id);
   }
   return ids;
 }
@@ -48,10 +89,7 @@ export function parseConfig(raw = {}, { home = os.homedir(), openclawConfig } = 
   if (!Array.isArray(botSenderIds) || botSenderIds.some((id) => typeof id !== "string" || !/^[BUW][A-Z0-9]{6,}$/.test(id))) {
     throw new ConfigError("botSenderIds must be a list of Slack ids");
   }
-  if (cfg.ownerSenderIds !== undefined && (!Array.isArray(cfg.ownerSenderIds) || ownerIdsFrom(cfg.ownerSenderIds).length !== cfg.ownerSenderIds.length)) {
-    throw new ConfigError("ownerSenderIds must be a list of Slack user ids");
-  }
-  const ownerSenderIds = ownerIdsFrom(cfg.ownerSenderIds ?? openclawConfig?.channels?.slack?.allowFrom);
+  const ownerSenderIds = resolveOwnerIds(cfg, openclawConfig);
   return { channelId, queueRoot: path.normalize(queueRoot), botSenderIds: [...botSenderIds], ownerSenderIds };
 }
 

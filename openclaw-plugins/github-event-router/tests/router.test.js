@@ -512,7 +512,7 @@ test("bad config fails closed: a hook still drops every feed message except the 
   assert.equal(await hook(...other), undefined);
 });
 
-test("a command request that cannot be published is saved to ops-failed.jsonl (Codex round 10)", async () => {
+test("a command request that cannot be published is saved as an ops-failed-<UUID>.json file (Codex round 10)", async () => {
   const root = await tempRoot();
   try {
     const errors = [];
@@ -524,28 +524,32 @@ test("a command request that cannot be published is saved to ops-failed.jsonl (C
     });
     assert.deepEqual(await handler(...hookArgs(SAMPLES.mentionComment)), { handled: true });
     await handler(...hookArgs(SAMPLES.mentionComment));
-    const lines = (await fs.readFile(path.join(root, "ops-failed.jsonl"), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
-    assert.equal(lines.length, 2);
-    assert.deepEqual(lines[0], {
-      kind: "command",
-      repo: "kennylhilljr/agent-control-plane-infra",
-      number: 6,
-      target_kind: "issue",
-      received_at: "2026-11-04T05:00:00.000Z",
-      slack_message_id: "1730643302.123456",
-      slack_channel: CHANNEL,
-      source: "github-event-router",
-      version: 1,
-    });
+    const names = (await fs.readdir(root)).filter((n) => n.startsWith("ops-failed")).sort();
+    assert.equal(names.length, 2);
+    for (const n of names) assert.match(n, /^ops-failed-[0-9a-f-]{36}\.json$/);
+    const records = await Promise.all(names.map(async (n) => JSON.parse(await fs.readFile(path.join(root, n), "utf8"))));
+    for (const r of records) {
+      assert.deepEqual(r, {
+        kind: "command",
+        repo: "kennylhilljr/agent-control-plane-infra",
+        number: 6,
+        target_kind: "issue",
+        received_at: "2026-11-04T05:00:00.000Z",
+        slack_message_id: "1730643302.123456",
+        slack_channel: CHANNEL,
+        source: "github-event-router",
+        version: 1,
+      });
+    }
     assert.equal(errors.length, 2);
-    assert.match(errors[0], /could not write command request \(ops is not a directory\); saved it to ops-failed\.jsonl/);
-    // A journal failure is logged and the post is still claimed.
+    assert.match(errors[0], /could not write command request \(ops is not a directory\); saved it to ops-failed-[0-9a-f-]{36}\.json for the drain to replay/);
+    // A fallback failure is logged and the post is still claimed.
     const lost = [];
     const broken = createHandler({ ...cfg, queueRoot: root }, { error: (m) => lost.push(m), info() {} }, {
       command: async () => {
         throw new Error("a");
       },
-      journal: async () => {
+      saveFailedCommand: async () => {
         throw new Error("b");
       },
     });

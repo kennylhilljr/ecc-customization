@@ -127,23 +127,37 @@ export async function writeCommand(root, command, { fsImpl = fs } = {}) {
   return publish(root, COMMAND_QUEUE, name, command, fsImpl);
 }
 
-// Fallback when a command request cannot be published. The drain renames
-// this file before replaying it, so appends made meanwhile are never lost.
-export const COMMAND_JOURNAL = "ops-failed.jsonl";
+// Fallback when a command request cannot be published to ops/: one file per
+// request in the queue root, ops-failed-<UUID>.json, written to .tmp and
+// renamed into place like a queue file. Nothing is ever appended to a
+// published file, so a drain that replays and removes one file cannot lose a
+// request written meanwhile; the drain only touches names it listed.
+export const FAILED_COMMAND_PREFIX = "ops-failed-";
 
-export async function appendCommandJournal(root, command, { fsImpl = fs } = {}) {
-  await fsImpl.mkdir(root, { recursive: true, mode: 0o700 });
-  await fsImpl.appendFile(path.join(root, COMMAND_JOURNAL), `${JSON.stringify(command)}\n`, { mode: 0o600 });
+export function failedCommandName(uuid = crypto.randomUUID()) {
+  return `${FAILED_COMMAND_PREFIX}${uuid}.json`;
+}
+
+/** Returns the path of the published ops-failed-<UUID>.json file. */
+export async function writeFailedCommand(root, command, { fsImpl = fs } = {}) {
+  return publishFile(root, root, "ops-failed", failedCommandName(), command, fsImpl);
 }
 
 async function publish(root, queue, name, record, fsImpl) {
   const queueDir = path.join(root, queue);
-  const tmpDir = path.join(root, ".tmp");
   await fsImpl.mkdir(queueDir, { recursive: true, mode: 0o700 });
-  await fsImpl.mkdir(tmpDir, { recursive: true, mode: 0o700 });
+  await fsImpl.mkdir(path.join(root, ".tmp"), { recursive: true, mode: 0o700 });
   await ensureMarker(root, fsImpl);
-  const tmp = path.join(tmpDir, `${queue}-${name}.${process.pid}.${crypto.randomBytes(3).toString("hex")}.tmp`);
-  const dest = path.join(queueDir, name);
+  return publishFile(root, queueDir, queue, name, record, fsImpl);
+}
+
+// Write record to an exclusive mode 0600 temp file in <root>/.tmp, sync and
+// close it, then rename it to <dir>/<name>.
+async function publishFile(root, dir, label, name, record, fsImpl) {
+  const tmpDir = path.join(root, ".tmp");
+  await fsImpl.mkdir(tmpDir, { recursive: true, mode: 0o700 });
+  const tmp = path.join(tmpDir, `${label}-${name}.${process.pid}.${crypto.randomBytes(3).toString("hex")}.tmp`);
+  const dest = path.join(dir, name);
   let handle;
   try {
     handle = await fsImpl.open(tmp, "wx", 0o600);
