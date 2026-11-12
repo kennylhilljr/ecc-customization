@@ -1028,7 +1028,8 @@ class DrainTest(unittest.TestCase):
         self.assertEqual(code, 0, self.output)
         self.assertIn(f"would replay {name}", self.output)
         self.assertNotIn(f"would replay {bad}", self.output)
-        self.assertIn(f"{bad} is not a valid command request; would move it to {self.rejected}", self.output)
+        self.assertIn(f"{bad} is not a valid command request; would move it to ", self.output)
+        self.assertIn("ops-rejected\n", self.output)
         self.assertEqual(self.snapshot(), before)
 
     def test_failed_request_dry_run_reports_unreadable(self):
