@@ -265,6 +265,13 @@ BLOCKED = [
     ("echo \"$(cat <<'EOF'\nit's )\nEOF\n./bootstrap.sh)\"", "bootstrap"),
     ("echo \"$(date)\" \"$(./bootstrap.sh)\"", "bootstrap"),
     ("echo \"$(date) `./bootstrap.sh`\"", "bootstrap"),
+    ("echo \"$(echo \"'\")$(./bootstrap.sh)\" \"$(echo \"'\")\"", "bootstrap"),
+    ("echo \"$(echo \"'\")\" \"$(./bootstrap.sh)\" \"$(echo \"'\")\"", "bootstrap"),
+    ("echo \"$(cat <<'A B'\n)\nA B\n; ./bootstrap.sh)\"", "bootstrap"),
+    ("cat <<EOF\nit's $(./bootstrap.sh)\nEOF", "bootstrap"),
+    ("echo $(( $(./bootstrap.sh) + 1 ))", "bootstrap"),
+    ("git archive --remote=ext::sh HEAD", "unchecked-git-config"),
+    ("*a(<=(sh $((*xargs &bash -c \nin", "unchecked-program"),
     ("rsync -e./bootstrap.sh a host:b", "bootstrap"),
     ("rsync -ave ./bootstrap.sh a host:b", "bootstrap"),
     ("tar -I./bootstrap.sh -cf a b", "bootstrap"),
@@ -389,6 +396,9 @@ ALLOWED = [
     "echo \"$((1<<2))\"",
     "git commit -m 'ext::x'",
     "tar -xvf x.tar",
+    "cat > /tmp/x <<'EOF'\nit's `./bootstrap.sh` $(./bootstrap.sh)\nEOF",
+    "echo hi # it's `./bootstrap.sh`",
+    "printf '%s\\n' \"$(git log -1 --format='%H (%s)')\"",
 ]
 
 

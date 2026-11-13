@@ -308,8 +308,8 @@ def split_commands(text):
                 # <(...), >(...) and zsh =(...) are a file name argument, not a redirection.
                 target = None
                 current.stdin_file = current.stdin_file and previous[1] != "<"
-                if previous[0] == "word":
-                    current.words.pop()
+                if previous[0] == "word" and current.words and ends[-1] == start:
+                    current.words.pop()     # the = of zsh =(...)
                     ends.pop()
                     sources.pop()
                 current.words.append(PROCESS_SUBSTITUTION)
@@ -389,7 +389,8 @@ def _backtick_end(text, index):
     return min(index, len(text))
 
 
-HEREDOC_START = re.compile(r"<<(-?)[ \t]*(\\?)(['\"]?)([^\s;&|<>()'\"]*)\3")
+HEREDOC_START = re.compile(
+    r"<<(-?)[ \t]*(\\?)(?:'([^']*)'|\"([^\"]*)\"|([^\s;&|<>()'\"]+))")
 CASE_WORD = re.compile(r"(?<![\w$-])(case|esac)(?![\w-])")
 
 
@@ -434,8 +435,9 @@ def _substitution_end(text, index):
             continue
         elif text.startswith("<<", index) and not text.startswith("<<<", index):
             match = HEREDOC_START.match(text, index)
-            if match and match.group(4):
-                pending.append((match.group(4), match.group(1) == "-"))
+            if match:
+                delimiter = next(group for group in match.group(3, 4, 5) if group is not None)
+                pending.append((delimiter, match.group(1) == "-"))
                 index = match.end()
             else:
                 index += 2
@@ -474,21 +476,55 @@ def _skip_heredoc_bodies(text, index, pending):
     return index
 
 
-def _substitution_starts(text, shell_quoting=True):
-    """Offsets of the $( and ` that start a command substitution in a word's source, or in
-    a here-document body (shell_quoting False: quotes there are plain text)."""
-    starts, index, double = [], 0, False
+def _scan_double(text, index, found):
+    """Scan a double-quoted string from just after its opening quote; collect the
+    substitutions in it and return the index after the closing quote."""
     while index < len(text):
         char = text[index]
-        if text.startswith("$(", index) or char == "`":
-            starts.append(index)
-            index += 2 if char == "$" else 1
-        elif char == "\\":
+        if char == "\\":
             index += 2
-        elif shell_quoting and char == '"':
-            double = not double
+        elif char == '"':
+            return index + 1
+        elif text.startswith("$(", index):
+            index = _collect_substitution(text, index, found)
+        elif char == "`":
+            stop = _backtick_end(text, index + 1)
+            found.append(text[index + 1:stop])
+            index = stop + 1
+        else:
             index += 1
-        elif shell_quoting and char == "'" and not double:
+    return len(text)
+
+
+def _collect_substitution(text, index, found):
+    """index is at "$("; collect the inside and return the index after the closing ")"."""
+    stop = _substitution_end(text, index + 2)
+    if text.startswith("$((", index):
+        # Arithmetic: only the substitutions inside it run commands.
+        found.extend(scan_substitutions(text[index + 3:max(index + 3, stop - 1)], quoting=False))
+    else:
+        found.append(text[index + 2:stop])
+    return stop + 1
+
+
+def scan_substitutions(text, quoting=True):
+    """Return the inside of every command substitution in a command, read the way bash
+    reads it: single quotes, $'...', double quotes, comments and here-documents.
+
+    The command text is scanned as a whole because shlex ends a double-quoted word at
+    the first inner quote, as in "$(echo "a b")". With quoting False (a here-document
+    body, arithmetic), quote characters are plain text.
+    """
+    found, index, pending, word_start = [], 0, [], True
+    while index < len(text):
+        char = text[index]
+        next_word_start = char in " \t\n;&|()"
+        if char == "\\":
+            index += 2
+        elif char == "\n" and pending:
+            index = _collect_heredocs(text, index + 1, pending, found)
+            pending = []
+        elif quoting and char == "'":
             if index > 0 and text[index - 1] == "$":
                 close = index + 1
                 while close < len(text) and text[close] != "'":
@@ -496,37 +532,49 @@ def _substitution_starts(text, shell_quoting=True):
             else:
                 close = text.find("'", index + 1)
             index = len(text) if close < 0 else close + 1
+        elif quoting and char == '"':
+            index = _scan_double(text, index + 1, found)
+        elif text.startswith("$(", index):
+            index = _collect_substitution(text, index, found)
+        elif char == "`":
+            stop = _backtick_end(text, index + 1)
+            found.append(text[index + 1:stop])
+            index = stop + 1
+        elif quoting and char == "#" and word_start:
+            newline = text.find("\n", index)
+            index = len(text) if newline < 0 else newline
+        elif quoting and text.startswith("<<", index) and not text.startswith("<<<", index):
+            match = HEREDOC_START.match(text, index)
+            if match:
+                quoted = bool(match.group(2) or match.group(3) is not None or
+                              match.group(4) is not None)
+                delimiter = next(group for group in match.group(3, 4, 5) if group is not None)
+                pending.append((delimiter, match.group(1) == "-", quoted))
+                index = match.end()
+            else:
+                index += 2
         else:
             index += 1
-    return starts
-
-
-def substitutions(command, texts):
-    """The inner text of every command substitution in the words and here-document bodies.
-
-    A substitution is read from the full command text, not the word shlex returned:
-    shlex ends a double-quoted word at the first inner quote, as in "$(echo "a b")".
-    """
-    found, covered = [], -1     # words: the end of the last substitution read from command
-    for text, offset in texts:
-        source = command if offset is not None else text
-        inner_covered = -1
-        for start in _substitution_starts(text, offset is not None):
-            position = start + (offset or 0)
-            if position >= len(source) or position <= (covered if offset is not None
-                                                       else inner_covered):
-                continue    # inside a substitution already read; the recursion checks it
-            if source.startswith("$(", position):
-                stop = _substitution_end(source, position + 2)
-                found.append(source[position + 2:stop])
-            else:
-                stop = _backtick_end(source, position + 1)
-                found.append(source[position + 1:stop])
-            if offset is not None:
-                covered = stop
-            else:
-                inner_covered = stop
+        word_start = next_word_start
     return found
+
+
+def _collect_heredocs(text, index, pending, found):
+    """Skip here-document bodies; collect the substitutions in the unquoted ones."""
+    for delimiter, strip_tabs, quoted in pending:
+        lines, closed = [], False
+        while index < len(text):
+            newline = text.find("\n", index)
+            line = text[index:] if newline < 0 else text[index:newline]
+            index = len(text) if newline < 0 else newline + 1
+            if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+                closed = True
+                break
+            lines.append(line)
+        if not quoted or not closed:
+            # Quotes are plain text in a here-document body; $(...) and `...` still run.
+            found.extend(scan_substitutions("\n".join(lines), quoting=False))
+    return index
 
 
 # ---------------------------------------------------------------- paths
@@ -1006,8 +1054,8 @@ def check_git(args, ctx):
         if ctx.via_xargs:
             return XARGS_MESSAGE.format("git config")
         return check_git_config(rest)
-    if sub in ("clone", "fetch", "pull", "push", "ls-remote", "remote", "submodule", "archive") \
-            and any(arg.lower().startswith("ext::") for arg in rest):
+    if any(arg.lower().startswith("ext::") or "=ext::" in arg.lower() for arg in rest) and \
+            sub in ("clone", "fetch", "pull", "push", "ls-remote", "remote", "submodule", "archive"):
         return _message("unchecked-git-config", "an ext:: remote runs a command the guard "
                                                 "cannot check")
     commands = []
@@ -1403,7 +1451,7 @@ def check_command(command, depth=0):
     except Unparsable as error:
         return _message("unparsable", "the command could not be parsed ({}), so it is not "
                                       "allowed".format(error))
-    for inner in substitutions(command, texts):
+    for inner in scan_substitutions(command):
         message = check_command(inner, depth + 1)
         if message:
             return message
