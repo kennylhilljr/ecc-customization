@@ -285,6 +285,8 @@ def _is_dynamic(name):
 
 def _is_assignment(word):
     name, equals, _ = word.partition("=")
+    if name.endswith("+"):
+        name = name[:-1]    # NAME+=value appends
     return bool(equals) and name.isidentifier()
 
 
@@ -518,7 +520,10 @@ def python_targets(args):
     return [], []
 
 
-SHELLS = ("sh", "bash", "zsh", "dash", "ksh", "mksh", "fish")
+SHELLS = ("sh", "bash", "rbash", "zsh", "dash", "ash", "ksh", "mksh", "oksh", "pdksh", "yash",
+          "posh", "fish", "csh", "tcsh")
+# Operands that name the command's own stdin or an open file descriptor.
+STDIN_PATHS = re.compile(r"^/(dev/stdin|dev/fd/\d+|proc/self/fd/\d+|dev/fd/?)$")
 
 
 def check_shell(args, command, ctx):
@@ -551,7 +556,7 @@ def check_shell(args, command, ctx):
         if index >= len(args):
             return None
         return check_command(args[index], ctx.depth + 1)
-    if reads_stdin or index >= len(args) or args[index] == "-":
+    if reads_stdin or index >= len(args) or args[index] == "-" or STDIN_PATHS.match(args[index]):
         if command.stdin and not command.stdin_file:
             for text in command.stdin:
                 message = check_command(text, ctx.depth + 1)
@@ -698,7 +703,7 @@ def check_git(args, ctx):
     return None
 
 
-WRAPPERS = ("env", "time", "sudo", "doas", "nohup", "command", "exec", "nice", "ionice", "caffeinate",
+WRAPPERS = ("env", "time", "busybox", "sudo", "doas", "nohup", "command", "exec", "nice", "ionice", "caffeinate",
             "xargs", "timeout", "gtimeout", "watch", "arch", "setsid", "stdbuf", "taskpolicy",
             "unbuffer", "builtin", "script", "coproc", "chronic")
 WRAPPER_VALUE_OPTIONS = {
@@ -728,13 +733,14 @@ def check_simple(command, depth):
     index, wrapper, via_xargs, env = 0, None, False, {}
     while index < len(words):
         word = words[index]
-        base = _base(word)
+        base = _base(word).lower()      # macOS file systems ignore case: ENV is env
         if word in RESERVED_WORDS:
             index += 1
         elif word == "function":
             index += 2
         elif _is_assignment(word):
             name, _, value = word.partition("=")
+            name = name.rstrip("+")
             env[name] = value
             if name in ENV_COMMAND_VARIABLES:
                 message = check_command(value, depth + 1)
@@ -802,10 +808,28 @@ def check_simple(command, depth):
     if base == "eval":
         return check_command(" ".join(args), depth + 1)
     if base in (".", "source"):
+        if args and STDIN_PATHS.match(args[0]):
+            if command.stdin and not command.stdin_file:
+                for text in command.stdin:
+                    message = check_command(text, depth + 1)
+                    if message:
+                        return message
+                return None
+            return STDIN_SHELL_MESSAGE
         return check_script(args[0], args[1:], ctx) if args else None
     if base == "trap":
+        if args[:1] == ["--"]:
+            args = args[1:]
         if args and not args[0].startswith("-"):
             return check_command(args[0], depth + 1)
+        return None
+    if base == "alias":
+        # shopt -s expand_aliases makes a later line run the alias.
+        for arg in args:
+            if "=" in arg:
+                message = check_command(arg.split("=", 1)[1], depth + 1)
+                if message:
+                    return message
         return None
     if base == "git":
         return check_git(args, ctx)
@@ -824,6 +848,8 @@ def check_simple(command, depth):
     codes = []
     if _is_python(base):
         scripts, codes = python_targets(args)
+        if any(STDIN_PATHS.match(script) for script, _ in scripts):
+            scripts, codes = [], list(command.stdin)
         for script, rest in scripts:
             message = check_script(script, rest, ctx)
             if message:

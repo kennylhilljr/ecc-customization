@@ -158,6 +158,19 @@ BLOCKED = [
     ("python3 - <<'EOF'\nimport os; os.system('bin/ecc-snapshot')\nEOF", "inline-code"),
     ("node -e \"require('child_process').execSync('./bootstrap.sh')\"", "inline-code"),
     ("awk 'BEGIN{system(\"./bootstrap.sh\")}'", "inline-code"),
+    ("csh -c ./bootstrap.sh", "bootstrap"),
+    ("busybox sh -c ./bootstrap.sh", "bootstrap"),
+    ("bash /dev/stdin <<EOF\n./bootstrap.sh\nEOF", "bootstrap"),
+    ("source /dev/stdin <<EOF\n./bootstrap.sh\nEOF", "bootstrap"),
+    ("bash /dev/fd/3", "unchecked-shell"),
+    ("python3 /dev/stdin <<EOF\nimport os; os.system('./bootstrap.sh')\nEOF", "inline-code"),
+    ("shopt -s expand_aliases; alias b=./bootstrap.sh\nb", "bootstrap"),
+    ("trap -- ./bootstrap.sh EXIT", "bootstrap"),
+    ("X+=1 ./bootstrap.sh", "bootstrap"),
+    # case-insensitive file systems
+    ("ENV ./bootstrap.sh", "bootstrap"),
+    ("NOHUP bin/ecc-snapshot", "ecc-snapshot"),
+    ("GIT config core.hooksPath x", "git-config"),
     # git running other commands
     ("git rebase --exec ./bootstrap.sh main", "bootstrap"),
     ("git -c core.pager=./bootstrap.sh log", "bootstrap"),
@@ -231,6 +244,8 @@ ALLOWED = [
     "cat bin/openclaw-gh-app-token",
     "npm test --prefix openclaw-plugins/github-event-router",
     "bin/ecc-kit --help",
+    "bash /dev/stdin <<EOF\necho hi\nEOF",
+    "alias ll='ls -la'",
 ]
 
 
