@@ -167,6 +167,21 @@ BLOCKED = [
     ("shopt -s expand_aliases; alias b=./bootstrap.sh\nb", "bootstrap"),
     ("trap -- ./bootstrap.sh EXIT", "bootstrap"),
     ("X+=1 ./bootstrap.sh", "bootstrap"),
+    ("echo ./bootstrap.sh | xargs -I % sh -c %", "unchecked-xargs"),
+    ("echo ./bootstrap.sh | xargs env", "unchecked-xargs"),
+    ("xargs -I% %", "unchecked-xargs"),
+    ("hash -p ./bootstrap.sh ls; ls", "hash"),
+    ("hash ls=./bootstrap.sh", "hash"),
+    ("BASH_ENV=bootstrap.sh bash -c true", "bootstrap"),
+    ("env 'BASH_FUNC_ls%%=() { bootstrap.sh; }' bash -c ls", "bootstrap"),
+    ("GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.pager GIT_CONFIG_VALUE_0=./bootstrap.sh git log",
+     "bootstrap"),
+    # zsh precommand modifiers and short forms
+    ("noglob ./bootstrap.sh", "bootstrap"),
+    ("nocorrect bin/ecc-snapshot", "ecc-snapshot"),
+    ("- ./bootstrap.sh", "bootstrap"),
+    ("repeat 2 ./bootstrap.sh", "bootstrap"),
+    ("if [[ -n x ]] ./bootstrap.sh", "bootstrap"),
     # case-insensitive file systems
     ("ENV ./bootstrap.sh", "bootstrap"),
     ("NOHUP bin/ecc-snapshot", "ecc-snapshot"),
@@ -246,6 +261,12 @@ ALLOWED = [
     "bin/ecc-kit --help",
     "bash /dev/stdin <<EOF\necho hi\nEOF",
     "alias ll='ls -la'",
+    "echo x | xargs",
+    "git ls-files | xargs grep -n foo",
+    "find . -name '*.pyc' -print0 | xargs -0 rm -f",
+    "git ls-files | xargs -I{} wc -l {}",
+    "env FOO=bar BAR=baz ls",
+    "[[ -f x ]] && echo y",
 ]
 
 

@@ -51,7 +51,7 @@ SEPARATORS = (";;&", "&&", "||", ";;", ";&", "|&", ";", "&", "|", "(", ")", "`",
 OPERATORS = sorted(REDIRECTIONS + SEPARATORS, key=len, reverse=True)
 # Shell keywords that can start a simple command once ; and newlines have split it.
 RESERVED_WORDS = ("{", "}", "!", "if", "then", "elif", "else", "fi", "do", "done", "while",
-                  "until", "case", "esac", "for", "select", "in")
+                  "until", "case", "esac", "for", "select", "in", "always", "end")
 # Characters that make a program name depend on an expansion the hook cannot see.
 EXPANSION_CHARS = "$`*?[{}"
 
@@ -586,7 +586,11 @@ GIT_CONFIG_MESSAGE = _message(
                   "shares one .git/config and the orchestrator stops the unit when it changes. "
                   "Read with --get or --list, or write a scratch file under /tmp with --file")
 ENV_COMMAND_VARIABLES = ("GIT_EDITOR", "GIT_SEQUENCE_EDITOR", "GIT_PAGER", "GIT_SSH_COMMAND",
-                         "GIT_EXTERNAL_DIFF", "EDITOR", "VISUAL", "PAGER")
+                         "GIT_EXTERNAL_DIFF", "GIT_ASKPASS", "SSH_ASKPASS", "GIT_PROXY_COMMAND",
+                         "EDITOR", "VISUAL", "PAGER")
+# Variables naming a file the shell sources before running anything.
+ENV_SOURCED_VARIABLES = ("BASH_ENV", "ENV")
+HASH_MESSAGE = _message("hash", "hash maps a command name to a script the guard protects")
 
 
 def check_git_c(value, ctx):
@@ -703,7 +707,7 @@ def check_git(args, ctx):
     return None
 
 
-WRAPPERS = ("env", "time", "busybox", "sudo", "doas", "nohup", "command", "exec", "nice", "ionice", "caffeinate",
+WRAPPERS = ("env", "time", "busybox", "noglob", "nocorrect", "-", "sudo", "doas", "nohup", "command", "exec", "nice", "ionice", "caffeinate",
             "xargs", "timeout", "gtimeout", "watch", "arch", "setsid", "stdbuf", "taskpolicy",
             "unbuffer", "builtin", "script", "coproc", "chronic")
 WRAPPER_VALUE_OPTIONS = {
@@ -730,7 +734,7 @@ WRAPPER_VALUE_OPTIONS = {
 def check_simple(command, depth):
     """Return a block message for one simple command, or None."""
     words = command.words
-    index, wrapper, via_xargs, env = 0, None, False, {}
+    index, wrapper, via_xargs, env, placeholder = 0, None, False, {}, None
     while index < len(words):
         word = words[index]
         base = _base(word).lower()      # macOS file systems ignore case: ENV is env
@@ -738,12 +742,19 @@ def check_simple(command, depth):
             index += 1
         elif word == "function":
             index += 2
-        elif _is_assignment(word):
+        elif word == "repeat" and wrapper is None:
+            index += 2      # zsh: repeat COUNT command
+        elif _is_assignment(word) or (wrapper == "env" and "=" in word and not word.startswith("-")):
             name, _, value = word.partition("=")
             name = name.rstrip("+")
             env[name] = value
-            if name in ENV_COMMAND_VARIABLES:
+            if name in ENV_COMMAND_VARIABLES or name.startswith("GIT_CONFIG_VALUE_") or \
+                    name.startswith("BASH_FUNC_"):
                 message = check_command(value, depth + 1)
+                if message:
+                    return message
+            if name in ENV_SOURCED_VARIABLES:
+                message = check_script(value, [], Context(env, via_xargs, depth))
                 if message:
                     return message
             index += 1
@@ -790,19 +801,55 @@ def check_simple(command, depth):
             values = WRAPPER_VALUE_OPTIONS.get(wrapper, ())
             takes_value = word in values or (
                 not word.startswith("--") and len(word) > 2 and "-" + word[-1] in values)
+            if wrapper == "xargs":
+                # -I R / -J R / -i: xargs puts each input line where R appears.
+                if word in ("-I", "-J") and index + 1 < len(words):
+                    placeholder = words[index + 1]
+                elif word[:2] in ("-I", "-J") and len(word) > 2:
+                    placeholder = word[2:]
+                    takes_value = False
+                elif word == "-i" or word.startswith("--replace"):
+                    placeholder = word.split("=", 1)[1] if "=" in word else "{}"
             index += 2 if takes_value else 1
         else:
             break
     words = words[index:]
     if not words:
+        if via_xargs and wrapper != "xargs":
+            # xargs env, xargs nohup: the program itself comes from stdin.
+            return XARGS_MESSAGE.format("a command")
         return None
     ctx = Context(env, via_xargs, depth)
     program, args = words[0], words[1:]
     base = _base(program).lower()
-    if program in ("[", "[[", "test"):
+    if placeholder and placeholder in program:
+        return XARGS_MESSAGE.format("a program")
+    if program in ("[", "[["):
+        # zsh short forms can follow the test: if [[ -n x ]] ./script
+        closer = "]" if program == "[" else "]]"
+        if closer in args:
+            rest = SimpleCommand()
+            rest.words = args[args.index(closer) + 1:]
+            return check_simple(rest, depth + 1) if rest.words else None
+        return None
+    if program == "test":
         return None
     if _is_dynamic(base):
         return DYNAMIC_MESSAGE
+    if via_xargs and (base in SHELLS or base in ("eval", ".", "source", "trap", "alias", "hash")
+                      or _is_python(base) or base in INLINE_FLAGS or base in AWKS):
+        return XARGS_MESSAGE.format(base)
+    if base == "hash":
+        for position, arg in enumerate(args):
+            target = None
+            if arg == "-p" and position + 1 < len(args):
+                target = args[position + 1]
+            elif "=" in arg and not arg.startswith("-"):
+                target = arg.split("=", 1)[1]       # zsh: hash name=path
+            if target is not None and (_base(target).lower() in SCRIPT_RULES or
+                                       _is_dynamic(_base(target))):
+                return HASH_MESSAGE
+        return None
     if base in SHELLS:
         return check_shell(args, command, ctx)
     if base == "eval":
