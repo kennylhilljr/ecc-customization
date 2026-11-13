@@ -1,0 +1,392 @@
+"""Tests for the project Claude Code hooks: .claude/settings.json and .claude/hooks/check_edit.py.
+
+Every case feeds a JSON payload shaped like Claude Code's to the hook in a subprocess and
+checks the exit code and message. Nothing here runs a guarded command: the hook only parses
+the command text. The post-edit cases use a temporary repository root.
+"""
+import json
+import os
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+HOOK = os.path.join(ROOT, ".claude", "hooks", "check_edit.py")
+SETTINGS = os.path.join(ROOT, ".claude", "settings.json")
+HINT = "\"Do not run\" section of AGENTS.md"
+
+
+def run_hook(event, payload, *extra, env=None):
+    data = payload if isinstance(payload, str) else json.dumps(payload)
+    return subprocess.run([sys.executable, "-B", HOOK, event, *extra], input=data,
+                          capture_output=True, text=True, timeout=120, env=env)
+
+
+def bash_payload(command):
+    return {"session_id": "test", "hook_event_name": "PreToolUse", "tool_name": "Bash",
+            "tool_input": {"command": command, "description": "test"}, "cwd": ROOT}
+
+
+# (command, rule named in the message)
+BLOCKED = [
+    # bootstrap.sh with anything but --help or -h
+    ("./bootstrap.sh", "bootstrap"),
+    ("./bootstrap.sh --dry-run", "bootstrap"),
+    ("./bootstrap.sh --only ops", "bootstrap"),
+    ("./bootstrap.sh --help --only ops", "bootstrap"),
+    ("bash bootstrap.sh", "bootstrap"),
+    ("sh ./bootstrap.sh -h --only ops", "bootstrap"),
+    ("bash -x bootstrap.sh", "bootstrap"),
+    ("source bootstrap.sh", "bootstrap"),
+    (". ./bootstrap.sh", "bootstrap"),
+    ("/Users/me/ecc-customization/bootstrap.sh", "bootstrap"),
+    ("./Bootstrap.SH", "bootstrap"),
+    ("x=1 ./bootstrap.sh --only ops", "bootstrap"),
+    # bin/ecc-snapshot in any form
+    ("bin/ecc-snapshot", "ecc-snapshot"),
+    ("./bin/ecc-snapshot --anything", "ecc-snapshot"),
+    ("bin/ecc-snapshot --help", "ecc-snapshot"),
+    ("sh bin/ecc-snapshot", "ecc-snapshot"),
+    ("cd bin && ./ecc-snapshot", "ecc-snapshot"),
+    # the command drain without --dry-run
+    ("bin/openclaw-gh-command-drain", "command-drain"),
+    ("bin/openclaw-gh-command-drain --retry-pending", "command-drain"),
+    ("bin/openclaw-gh-command-drain --queue /tmp/q", "command-drain"),
+    ("openclaw-gh-command-drain", "command-drain"),
+    ("sh bin/openclaw-gh-command-drain", "command-drain"),
+    ("python3 lib/gh_command_drain.py", "command-drain"),
+    ("python3 lib/gh_command_drain.py --retry-pending", "command-drain"),
+    ("python3 lib/gh_command_drain.py --queue x -- --dry-run", "command-drain"),
+    ("python3 -m gh_command_drain", "command-drain"),
+    ("python3 -m runpy lib/gh_command_drain.py", "command-drain"),
+    # the App token helper
+    ("bin/openclaw-gh-app-token", "app-token"),
+    ("openclaw-gh-app-token", "app-token"),
+    ("bash bin/openclaw-gh-app-token --help", "app-token"),
+    # bin/ecc runs the real orchestrator
+    ("bin/ecc status --run-id x", "ecc"),
+    ("ecc --project /tmp/x status", "ecc"),
+    # lib/ecctools.py against the real home folder or OpenClaw state
+    ("python3 lib/ecctools.py restore --root /Users/me", "ecctools"),
+    ("python3 lib/ecctools.py restore --root machine", "ecctools"),
+    ("python3 lib/ecctools.py snapshot", "ecctools"),
+    ("python3 lib/ecctools.py snapshot --root machine --home /tmp/x", "ecctools"),
+    ("python3 lib/ecctools.py snapshot --root /tmp/r", "ecctools"),
+    ("python3 lib/ecctools.py restore --root machine --home /tmp/x --home /Users/me", "ecctools"),
+    ("python3 lib/ecctools.py restore --root machine --home /tmp/../Users/me", "ecctools"),
+    ("python3 lib/ecctools.py restore --root machine --home /tmp/x --ho=/Users/me", "ecctools"),
+    ("python3 lib/ecctools.py restore --root machine --home tmp/x", "ecctools"),
+    ("python3 lib/ecctools.py restore --root machine --home ~", "ecctools"),
+    ("python3 lib/ecctools.py restore --root machine --home $TMPDIR/x", "ecctools"),
+    ("python3 lib/ecctools.py rest --root machine --home ~", "ecctools"),
+    ("python3 lib/ecctools.py openclaw-restore --archive a.tgz --dest /Users/me/.openclaw", "ecctools"),
+    ("python3 lib/ecctools.py openclaw-plugin --plugin-dir x --state-dir ~/.openclaw", "ecctools"),
+    ("python3 -m ecctools restore --root machine --home ~", "ecctools"),
+    ("./lib/ecctools.py restore --root machine", "ecctools"),
+    ("HOME=/tmp/h env -u HOME python3 lib/ecctools.py restore --root machine", "ecctools"),
+    ("HOME=/tmp/h env -i python3 lib/ecctools.py restore --root machine", "ecctools"),
+    ("sudo HOME=/tmp/x python3 lib/ecctools.py restore --root m --home ~", "ecctools"),
+    # git config writes to the repository config
+    ("git config core.hooksPath .githooks", "git-config"),
+    ("git config --unset core.hooksPath", "git-config"),
+    ("git config --add core.hooksPath x", "git-config"),
+    ("git config set core.hooksPath x", "git-config"),
+    ("git config --replace-all core.hooksPath x", "git-config"),
+    ("git -C /tmp/x config core.hooksPath .githooks", "git-config"),
+    ("git --git-dir=/tmp/x/.git config a.b c", "git-config"),
+    ("git config --global user.name x", "git-config"),
+    ("git config --file /tmp/x/.git/config a.b c", "git-config"),
+    ("git config --global --file /tmp/x/cfg a.b c", "git-config"),
+    ("git config core.hooksPath \"|\" .githooks", "git-config"),
+    ("git config --repl core.hooksPath x", "git-config"),
+    # control operators with and without spaces
+    ("echo first;./bootstrap.sh", "bootstrap"),
+    ("echo first|bin/ecc-snapshot", "ecc-snapshot"),
+    ("echo first&&./bootstrap.sh", "bootstrap"),
+    ("false||./bootstrap.sh", "bootstrap"),
+    ("echo first&./bootstrap.sh", "bootstrap"),
+    ("echo first\n./bootstrap.sh", "bootstrap"),
+    ("echo a # it's a comment\n./bootstrap.sh", "bootstrap"),
+    ("if true; then ./bootstrap.sh; fi", "bootstrap"),
+    ("while true; do bin/ecc-snapshot; done", "ecc-snapshot"),
+    ("! ./bootstrap.sh", "bootstrap"),
+    # grouping and substitutions
+    ("{ ./bootstrap.sh; }", "bootstrap"),
+    ("(./bootstrap.sh)", "bootstrap"),
+    ("echo \"$(./bootstrap.sh)\"", "bootstrap"),
+    ("echo $(bin/ecc-snapshot)", "ecc-snapshot"),
+    ("echo `bin/ecc-snapshot`", "ecc-snapshot"),
+    ("echo \"`bin/ecc-snapshot`\"", "ecc-snapshot"),
+    ("echo x > >(./bootstrap.sh)", "bootstrap"),
+    ("diff <(bin/ecc-snapshot) x", "ecc-snapshot"),
+    ("cat <<EOF\n$(./bootstrap.sh)\nEOF", "bootstrap"),
+    ("coproc X { ./bootstrap.sh; }", "bootstrap"),
+    ("f() { ./bootstrap.sh; }; f", "bootstrap"),
+    # wrappers
+    ("env FOO=1 ./bootstrap.sh", "bootstrap"),
+    ("env -S './bootstrap.sh'", "bootstrap"),
+    ("env -iS'bin/ecc-snapshot'", "ecc-snapshot"),
+    ("time -p ./bootstrap.sh", "bootstrap"),
+    ("nohup bin/ecc-snapshot &", "ecc-snapshot"),
+    ("timeout 5 ./bootstrap.sh", "bootstrap"),
+    ("nice -n 5 bin/ecc-snapshot", "ecc-snapshot"),
+    ("command ./bootstrap.sh", "bootstrap"),
+    ("exec ./bootstrap.sh", "bootstrap"),
+    ("caffeinate -i bin/ecc-snapshot", "ecc-snapshot"),
+    ("watch -n 1 ./bootstrap.sh", "bootstrap"),
+    ("eval ./bootstrap.sh", "bootstrap"),
+    ("trap './bootstrap.sh' EXIT", "bootstrap"),
+    ("find . -name x -exec bin/ecc-snapshot {} \\;", "ecc-snapshot"),
+    ("xargs ./bootstrap.sh", "unchecked-xargs"),
+    ("xargs python3 lib/ecctools.py restore --home /tmp/x", "unchecked-xargs"),
+    # shells and interpreters
+    ("bash -c './bootstrap.sh'", "bootstrap"),
+    ("bash -euo pipefail -c './bootstrap.sh'", "bootstrap"),
+    ("bash -lc 'bin/ecc-snapshot'", "ecc-snapshot"),
+    ("zsh -c ./bootstrap.sh", "bootstrap"),
+    ("sh -c \"echo ok; bin/openclaw-gh-command-drain\"", "command-drain"),
+    ("bash -c 'bash -c \"./bootstrap.sh\"'", "bootstrap"),
+    ("echo ./bootstrap.sh | bash", "unchecked-shell"),
+    ("cat x | sh", "unchecked-shell"),
+    ("bash -s < script.sh", "unchecked-shell"),
+    ("bash <<'EOF'\n./bootstrap.sh\nEOF", "bootstrap"),
+    ("bash <<< './bootstrap.sh'", "bootstrap"),
+    ("python3 -c \"import subprocess; subprocess.run(['./bootstrap.sh'])\"", "inline-code"),
+    ("python3 - <<'EOF'\nimport os; os.system('bin/ecc-snapshot')\nEOF", "inline-code"),
+    ("node -e \"require('child_process').execSync('./bootstrap.sh')\"", "inline-code"),
+    ("awk 'BEGIN{system(\"./bootstrap.sh\")}'", "inline-code"),
+    # git running other commands
+    ("git rebase --exec ./bootstrap.sh main", "bootstrap"),
+    ("git -c core.pager=./bootstrap.sh log", "bootstrap"),
+    ("git -c alias.x=config x core.hooksPath y", "unchecked-git-alias"),
+    ("git submodule foreach ./bootstrap.sh", "bootstrap"),
+    ("git bisect run bin/ecc-snapshot", "ecc-snapshot"),
+    ("GIT_EDITOR=./bootstrap.sh git commit", "bootstrap"),
+    # names the guard cannot see
+    ("$X --help", "unchecked-program"),
+    ("\"$PROGRAM\" ./bootstrap.sh", "unchecked-program"),
+    ("./boot*.sh --dry-run", "unchecked-program"),
+    ("{./bootstrap.sh,}", "unchecked-program"),
+    ("$'./bootstrap.sh'", "unchecked-program"),
+    ("$'boot\\x73trap.sh'", "unchecked-program"),
+    ("bash $'boot\\x73trap.sh'", "unchecked-program"),
+    ("bash -c '\"$0\"' ./bootstrap.sh", "unchecked-program"),
+    ("echo \"unclosed", "unparsable"),
+    ("./boot\\\nstrap.sh", "bootstrap"),
+]
+
+ALLOWED = [
+    "./bootstrap.sh --help",
+    "./bootstrap.sh -h",
+    "bin/openclaw-gh-command-drain --dry-run",
+    "bin/openclaw-gh-command-drain --dry-run --retry-pending",
+    "python3 lib/gh_command_drain.py --dry-run --queue /tmp/q",
+    "grep -n ecc-snapshot README.md",
+    "echo \"bootstrap.sh\"",
+    "echo 'a;./bootstrap.sh'",
+    "printf '%s\\n' \"bin/ecc-snapshot\"",
+    "rg \"bin/ecc-snapshot|openclaw-gh-app-token\" -n .",
+    "grep -n bootstrap.sh README.md && echo done",
+    "python3 lib/ecctools.py restore --root machine --home /tmp/x --dry-run",
+    "HOME=/tmp/h python3 lib/ecctools.py restore --root machine",
+    "python3 lib/ecctools.py snapshot --root /tmp/r --home /tmp/h",
+    "python3 lib/ecctools.py openclaw-restore --archive a.tgz --dest /tmp/x",
+    "python3 lib/ecctools.py openclaw-plugin --plugin-dir openclaw-plugins/github-event-router "
+    "--state-dir /tmp/s",
+    "python3 lib/ecctools.py --help",
+    "python3 lib/ecctools.py restore --help",
+    "python3 lib/ecctools.py scan README.md AGENTS.md",
+    "python3 lib/ecctools.py kit-new /tmp/x --name demo",
+    "bash -n bootstrap.sh",
+    "sh -n bin/ecc-snapshot",
+    "/bin/bash -n bin/openclaw-gh-app-token",
+    "bash --version",
+    "sh scripts/check.sh",
+    "python3 -m unittest discover -s tests",
+    "/usr/bin/python3 -B -m unittest discover -s tests",
+    "python3 -m json.tool .claude/settings.json",
+    "python3 -c \"print(1)\"",
+    "git config --get core.hooksPath",
+    "git config core.hooksPath",
+    "git config get core.hooksPath",
+    "git -C /tmp/x config --get core.hooksPath",
+    "git config --list --show-origin",
+    "git config --file /tmp/x/cfg a.b c",
+    "git -c user.name=x commit -m 'it is'",
+    "git status && git diff origin/main...HEAD",
+    "git log --oneline -5 | cat",
+    "git commit -m \"$(cat <<'EOF'\nDon't run bootstrap.sh (it's bad)\n1) first\nEOF\n)\"",
+    "cat > /tmp/x.txt <<'EOF'\nit's ./bootstrap.sh text\nEOF",
+    "cat <<EOF > /tmp/a\nhello $(date)\nEOF",
+    "echo hi # don't",
+    "echo ${#x} $# done",
+    "ls -la 2>&1 | head",
+    "command -v bootstrap.sh",
+    "[ -x ./bootstrap.sh ] && echo yes",
+    "for f in a b; do echo $f; done",
+    "sed -n 1,5p bootstrap.sh",
+    "cat bin/openclaw-gh-app-token",
+    "npm test --prefix openclaw-plugins/github-event-router",
+    "bin/ecc-kit --help",
+]
+
+
+class PreBashBlocks(unittest.TestCase):
+    def test_each_forbidden_command_exits_2_and_names_its_rule(self):
+        for command, rule in BLOCKED:
+            with self.subTest(command=command):
+                result = run_hook("pre-bash", bash_payload(command))
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn("({})".format(rule), result.stderr)
+                self.assertIn(HINT, result.stderr)
+                self.assertEqual(result.stdout, "")
+
+
+class PreBashAllows(unittest.TestCase):
+    def test_each_allowed_command_exits_0_silently(self):
+        for command in ALLOWED:
+            with self.subTest(command=command):
+                result = run_hook("pre-bash", bash_payload(command))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stderr, "")
+
+    def test_payloads_without_a_command_are_ignored(self):
+        for payload in ({}, {"tool_name": "Bash"}, {"tool_name": "Bash", "tool_input": {}},
+                        {"tool_name": "Bash", "tool_input": {"command": 5}}, [], "not json"):
+            with self.subTest(payload=payload):
+                result = run_hook("pre-bash", payload)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class PreBashChains(unittest.TestCase):
+    def test_a_mention_is_allowed_but_a_chained_run_is_not(self):
+        self.assertEqual(run_hook("pre-bash", bash_payload(
+            "grep -n bootstrap.sh README.md && echo done")).returncode, 0)
+        for command in ("echo first && ./bootstrap.sh", "echo first;./bootstrap.sh",
+                        "echo first|bin/ecc-snapshot"):
+            with self.subTest(command=command):
+                self.assertEqual(run_hook("pre-bash", bash_payload(command)).returncode, 2)
+
+
+class Settings(unittest.TestCase):
+    EXPECTED = {
+        "PreToolUse": ("Bash", "pre-bash"),
+        "PostToolUse": ("Write|Edit|MultiEdit", "post-edit"),
+    }
+
+    def setUp(self):
+        with open(SETTINGS, encoding="utf-8") as handle:
+            self.settings = json.load(handle)
+
+    def test_only_two_hooks_and_both_call_check_edit(self):
+        self.assertEqual(set(self.settings), {"hooks"})
+        hooks = self.settings["hooks"]
+        self.assertEqual(set(hooks), set(self.EXPECTED))
+        for event, (matcher, subcommand) in self.EXPECTED.items():
+            with self.subTest(event=event):
+                groups = hooks[event]
+                self.assertEqual(len(groups), 1)
+                self.assertEqual(groups[0]["matcher"], matcher)
+                self.assertEqual(set(groups[0]), {"matcher", "hooks"})
+                handlers = groups[0]["hooks"]
+                self.assertEqual(len(handlers), 1)
+                self.assertEqual(handlers[0]["type"], "command")
+                self.assertNotIn("args", handlers[0])
+                self.assertEqual(shlex.split(handlers[0]["command"]),
+                                 ["python3", "$CLAUDE_PROJECT_DIR/.claude/hooks/check_edit.py",
+                                  subcommand])
+
+    def test_the_guard_blocks_the_call_when_it_fails(self):
+        handler = self.settings["hooks"]["PreToolUse"][0]["hooks"][0]
+        self.assertEqual(handler.get("onFailure"), "block")
+
+    def test_the_configured_command_runs_the_hook(self):
+        handler = self.settings["hooks"]["PreToolUse"][0]["hooks"][0]
+        env = dict(os.environ, CLAUDE_PROJECT_DIR=ROOT, PYTHONDONTWRITEBYTECODE="1")
+        for command, code in (("./bootstrap.sh", 2), ("./bootstrap.sh --help", 0)):
+            with self.subTest(command=command):
+                result = subprocess.run(["sh", "-c", handler["command"]],
+                                        input=json.dumps(bash_payload(command)),
+                                        capture_output=True, text=True, timeout=60, env=env)
+                self.assertEqual(result.returncode, code, result.stderr)
+
+    def test_the_hook_is_executable(self):
+        self.assertTrue(os.access(HOOK, os.X_OK))
+
+
+class PostEditReports(unittest.TestCase):
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="ecc-hook-test-", dir="/tmp")
+        self.addCleanup(shutil.rmtree, self.root, True)
+        for folder in ("bin", "lib", "tests"):
+            os.mkdir(os.path.join(self.root, folder))
+        with open(os.path.join(self.root, "AGENTS.md"), "w", encoding="utf-8") as handle:
+            handle.write("# test root\n")
+        shutil.copy(os.path.join(ROOT, "lib", "ecctools.py"), os.path.join(self.root, "lib"))
+
+    def write(self, relative, text):
+        path = os.path.join(self.root, relative)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        return path
+
+    def edit(self, path, tool="Edit"):
+        payload = {"hook_event_name": "PostToolUse", "tool_name": tool,
+                   "tool_input": {"file_path": path}, "tool_response": {"success": True}}
+        env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+        return run_hook("post-edit", payload, "--root", self.root, env=env)
+
+    def assert_reported(self, result, *needles):
+        self.assertEqual(result.returncode, 0, result.stderr)
+        context = json.loads(result.stdout)["hookSpecificOutput"]
+        self.assertEqual(context["hookEventName"], "PostToolUse")
+        for needle in needles:
+            self.assertIn(needle, context["additionalContext"])
+
+    def test_broken_shell_script_is_reported_without_blocking(self):
+        path = self.write("bin/broken.sh", "#!/bin/sh\nif then\n")
+        self.assert_reported(self.edit(path, "Write"), "FAIL: sh -n for bin/broken.sh")
+
+    def test_broken_python_file_is_reported_without_blocking(self):
+        path = self.write("lib/broken.py", "def broken(:\n    pass\n")
+        self.assert_reported(self.edit(path), "FAIL: py_compile for lib/broken.py", "SyntaxError")
+
+    def test_a_failing_test_module_runs_itself(self):
+        path = self.write("tests/test_fake.py", "import unittest\n\n\nclass T(unittest.TestCase):\n"
+                                                "    def test_fails(self):\n"
+                                                "        self.assertEqual(1, 2)\n")
+        self.assert_reported(self.edit(path, "MultiEdit"), "FAIL: unittest test_fake")
+
+    def test_a_secret_shaped_value_is_reported(self):
+        token = "gh" + "p_" + "Q" * 24
+        path = self.write("lib/notes.txt", "token = {}\n".format(token))
+        result = self.edit(path)
+        self.assert_reported(result, "FAIL: secret scan for lib/notes.txt", "github token")
+        self.assertNotIn(token, result.stdout + result.stderr)
+
+    def test_a_healthy_file_reports_nothing(self):
+        path = self.write("lib/good.py", "VALUE = 1\n")
+        result = self.edit(path)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("PASS py_compile (lib/good.py)", result.stderr)
+        self.assertNotIn("FAIL", result.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.root, "lib", "__pycache__")))
+
+    def test_files_outside_the_root_and_missing_files_are_ignored(self):
+        outside = tempfile.NamedTemporaryFile("w", suffix=".py", dir="/tmp", delete=False)
+        outside.write("def broken(:\n")
+        outside.close()
+        self.addCleanup(os.unlink, outside.name)
+        for payload_path in (outside.name, os.path.join(self.root, "lib", "missing.py"), None):
+            with self.subTest(path=payload_path):
+                result = self.edit(payload_path)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "")
+
+
+if __name__ == "__main__":
+    unittest.main()

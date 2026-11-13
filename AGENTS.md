@@ -38,6 +38,8 @@ sh scripts/check.sh
 
 The runner creates `/tmp/ecc-check.XXXXXX` storage without using the incoming `TMPDIR`, directs Python bytecode and the npm cache away from the checkout, and removes the storage on exit or a catchable termination signal. It prints one status for every check and continues after failures, then exits 1 if any check failed. `plist-lint` is skipped with an explanation only when `plutil` is unavailable; a failing `plutil` is a failed check. A missing required script or other prerequisite is also a failure.
 
+Claude Code also loads the project hooks in `.claude/settings.json`, both run by `.claude/hooks/check_edit.py`. Before a Bash command, `pre-bash` blocks the commands listed under "Do not run" below (exit 2 with the rule); after a Write, Edit or MultiEdit, `post-edit` runs the syntax check, matching test module and secret scan for that one file and reports failures without blocking. They are a guardrail against mistakes, not a security boundary; `tests/test_claude_hooks.py` covers them.
+
 The scan prints nothing and exits 0 when clean, or exits 1 and names file, line and kind. If you run `shellcheck`, the current scripts already report SC1007 warnings and SC1091, SC2015 and SC2016 notes; do not add new findings. To try a `kit/` change, run `bin/ecc-kit new` against an empty temporary folder, never a real project.
 
 ## Do not run

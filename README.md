@@ -382,6 +382,12 @@ The scan returns `0` with no output when it finds no recognized patterns, or `1`
 
 There is no shellcheck configuration. Optional `shellcheck` runs currently report SC1007 warnings and SC1091, SC2015 and SC2016 notes; changes should not add findings.
 
+### Project Claude Code hooks
+
+`.claude/settings.json` gives Claude Code sessions in this repository two hooks, both implemented by `.claude/hooks/check_edit.py` (Python 3.9, standard library only). Before each Bash command, `check_edit.py pre-bash` blocks what the "Do not run" section of `AGENTS.md` forbids: `bootstrap.sh` with anything but `--help` or `-h`, `bin/ecc-snapshot`, `bin/ecc`, `bin/openclaw-gh-app-token`, the command drain without `--dry-run`, `lib/ecctools.py` `snapshot`, `restore`, `openclaw-restore` or `openclaw-plugin` unless their home, destination or state folders are absolute paths under `/tmp` or the system temp folder, and `git config` writes other than to a scratch `--file` under `/tmp`. It reads the command the way the shell does, so a name inside a `grep` pattern or an `echo` string is allowed, while chains (`;`, `&&`, `|`, with or without spaces), subshells, `$(...)`, here-documents, wrappers such as `env`, `timeout` and `xargs`, and scripts run through `sh`, `bash -c`, `source`, `eval` or `python3` are checked. A command it cannot parse, or whose program name comes from a shell expansion, is blocked too.
+
+After a Write, Edit or MultiEdit, `check_edit.py post-edit` runs only the checks for that file, with `TMPDIR` set to a fresh folder under `/tmp`: `bash -n` for `bootstrap.sh`, `stack.conf` and `bin/openclaw-gh-app-token`; `sh -n` for the other `bin/` scripts, `.githooks/pre-commit` and `scripts/*.sh`; `python3 -m py_compile` and the matching test modules for `lib/`, `tests/` and `.claude/hooks/` Python files (`lib/ecctools.py` runs every test that mentions it); `plutil -lint` for property lists; `npm test` for the event router plugin; `python3 -m json.tool` for other JSON files; and `lib/ecctools.py scan` for every text file. Failures go back to Claude as context and never block the edit. The hooks are a guardrail against mistakes by interactive coding agents, not a security boundary: an agent can still run a forbidden command by copying or wrapping it where the parser cannot see it. `tests/test_claude_hooks.py` covers both hooks.
+
 ## Troubleshooting
 
 | Symptom | What to check |
