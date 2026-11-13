@@ -241,20 +241,31 @@ PROCESS_SUBSTITUTION = "/dev/fd/63"
 def split_commands(text):
     """Split a shell command into simple commands.
 
-    Returns (commands, texts): texts are every word value and unquoted
-    here-document body, where a command substitution can hide. The inside of an
-    unquoted $(...), `...`, <(...) or >(...) becomes commands of its own, and the
-    command around it keeps going after the closing parenthesis.
+    Returns (commands, texts). texts holds (text, shell_quoting) pairs: the source of
+    every word and every unquoted here-document body, where a command substitution can
+    hide. The inside of an unquoted $(...), `...`, <(...), >(...) or zsh =(...) becomes
+    commands of its own, and the command around it keeps going after it closes.
     """
     commands, texts, owners = [], [], []
     current = SimpleCommand()
     ends, sources = [], []
     target, last = None, None
-    stack = []      # (kind, outer command, its ends, its sources)
+    stack = []      # (kind, outer command, its ends, its sources, its case depth)
+    case_depth = 0  # open case ... esac at this level: a ) there ends a pattern
 
     def finish():
         if current.words or current.stdin:
             commands.append(current)
+
+    def mark_dynamic(start):
+        # The substitution's output is part of the outer command: mark the word it joins,
+        # or add a word of its own, as an expansion the guard cannot read.
+        if current.words and ends[-1] == start:
+            current.words[-1] += "$"
+        else:
+            current.words.append("$")
+            ends.append(start)
+            sources.append("$")
 
     for token in _tokens(text):
         kind = token[0]
@@ -263,11 +274,11 @@ def split_commands(text):
             if owners:
                 owners.pop(0).stdin.append(body)
             if not quoted:
-                texts.append(body.replace("\\\n", ""))
+                texts.append((body.replace("\\\n", ""), False))
             continue
         if kind == "word":
             _, value, source, start, end = token
-            texts.append(value)
+            texts.append((source, True))
             last = token
             if target is not None:
                 if target == "<<<":
@@ -278,40 +289,56 @@ def split_commands(text):
                 # ANSI-C or locale quoting: shlex does not decode $'\x2e'. A trailing $ marks
                 # the word, its last path part included, as an expansion the guard cannot read.
                 value = value + "$"
+            leading = all(word in RESERVED_WORDS for word in current.words)
+            if leading and source == "case":
+                case_depth += 1
+            elif leading and source == "esac" and case_depth:
+                case_depth -= 1
             current.words.append(value)
             ends.append(end)
             sources.append(source)
             continue
         _, piece, start, end = token
         previous, last = last, token
-        if piece == "(" and previous is not None and previous[-1] == start and (
+        adjacent = previous is not None and previous[-1] == start
+        if piece == "(" and adjacent and (
                 (previous[0] == "op" and previous[1] in ("<", ">")) or
-                (previous[0] == "word" and previous[2].endswith("$"))):
-            if previous[0] == "op":
-                # <(...) and >(...) are a file name argument, not a redirection.
+                (previous[0] == "word" and (previous[2].endswith("$") or previous[2] == "="))):
+            if previous[0] == "op" or previous[2] == "=":
+                # <(...), >(...) and zsh =(...) are a file name argument, not a redirection.
                 target = None
                 current.stdin_file = current.stdin_file and previous[1] != "<"
+                if previous[0] == "word":
+                    current.words.pop()
+                    ends.pop()
+                    sources.pop()
                 current.words.append(PROCESS_SUBSTITUTION)
-                ends.append(-1)
+                ends.append(end)
                 sources.append(PROCESS_SUBSTITUTION)
-            stack.append(("sub", current, ends, sources))
-            current, ends, sources = SimpleCommand(), [], []
+            stack.append(("sub", current, ends, sources, case_depth))
+            current, ends, sources, case_depth = SimpleCommand(), [], [], 0
             continue
         if piece == "`":
             if stack and stack[-1][0] == "backtick":
                 finish()
-                _, current, ends, sources = stack.pop()
+                _, current, ends, sources, case_depth = stack.pop()
             else:
-                stack.append(("backtick", current, ends, sources))
-                current, ends, sources = SimpleCommand(), [], []
+                mark_dynamic(start)
+                stack.append(("backtick", current, ends, sources, case_depth))
+                current, ends, sources, case_depth = SimpleCommand(), [], [], 0
+            continue
+        if piece == ")" and case_depth and not (stack and stack[-1][0] == "group"):
+            target = None       # the end of a case pattern: the commands follow
+            finish()
+            current, ends, sources = SimpleCommand(), [], []
             continue
         if piece == ")" and stack and stack[-1][0] == "sub":
             finish()
-            _, current, ends, sources = stack.pop()
+            _, current, ends, sources, case_depth = stack.pop()
             target = None
             continue
         if piece == "(":
-            stack.append(("group", None, None, None))
+            stack.append(("group", None, None, None, None))
         elif piece == ")" and stack and stack[-1][0] == "group":
             stack.pop()
         if piece in REDIRECTIONS:
@@ -331,33 +358,47 @@ def split_commands(text):
         ends, sources = [], []
     finish()
     while stack:
-        _, outer, _, _ = stack.pop()
+        outer = stack.pop()[1]
         if outer is not None and outer is not current:
             current = outer
             finish()
     return commands, texts
 
 
-def _substitutions(text):
-    """Return the text of each $(...) and `...` in a word or here-document body.
+def _substitutions(text, shell_quoting=True):
+    """Return the text of each $(...) and `...` in a word's source or a here-document body.
 
-    A $( runs to the last ) in the text, so a ) that closes a case pattern or sits in
-    quotes cannot end it early; any text in between is checked as commands too.
+    With shell_quoting, single-quoted spans are skipped, as bash does. A $( runs to the
+    last ) in the text, so a ) that closes a case pattern or sits in quotes cannot end it
+    early; any text in between is checked as commands too.
     """
-    found, index = [], 0
+    found, index, double = [], 0, False
     while index < len(text):
+        char = text[index]
         if text.startswith("$(", index):
             stop = text.rfind(")")
             stop = len(text) if stop <= index + 1 else stop
             found.append(text[index + 2:stop])
             index = stop + 1
-        elif text[index] == "`":
-            stop = text.find("`", index + 1)
-            stop = len(text) if stop < 0 else stop
+        elif char == "`":
+            stop = index + 1
+            while stop < len(text) and text[stop] != "`":
+                stop += 2 if text[stop] == "\\" else 1
             found.append(text[index + 1:stop])
             index = stop + 1
-        elif text[index] == "\\":
+        elif char == "\\":
             index += 2
+        elif shell_quoting and char == '"':
+            double = not double
+            index += 1
+        elif shell_quoting and char == "'" and not double:
+            if text.startswith("$'", index - 1) and index > 0:
+                close = index + 1
+                while close < len(text) and text[close] != "'":
+                    close += 2 if text[close] == "\\" else 1
+            else:
+                close = text.find("'", index + 1)
+            index = len(text) if close < 0 else close + 1
         else:
             index += 1
     return found
@@ -692,6 +733,8 @@ def check_shell(args, command, ctx):
             index += 2 if arg[-1] in "oO" else 1    # -euo pipefail
             continue
         break
+    if ctx.via_xargs:
+        return XARGS_MESSAGE.format("a shell")    # stdin words become its script or -c string
     if has_c:
         if index >= len(args):
             return None
@@ -838,6 +881,9 @@ def check_git(args, ctx):
         if ctx.via_xargs:
             return XARGS_MESSAGE.format("git config")
         return check_git_config(rest)
+    if any(arg.startswith("ext::") for arg in rest):
+        return _message("unchecked-git-config", "an ext:: remote runs a command the guard "
+                                                "cannot check")
     commands = []
     short = GIT_SHORT_COMMAND_OPTIONS.get(sub)
     for position, arg in enumerate(rest):
@@ -865,6 +911,38 @@ def check_git(args, ctx):
         if message:
             return message
     return None
+
+
+# Options whose value is a command line the program runs.
+COMMAND_OPTIONS = {
+    "rsync": ("-e", "--rsh", "--rsync-path"),
+    "sort": ("--compress-program",),
+    "tar": ("-I", "--use-compress-program", "--to-command", "--rsh-command"),
+    "bsdtar": ("-I", "--use-compress-program"),
+    "zip": ("-TT", "--unzip-command"),
+    "scp": ("-S",),
+    "sftp": ("-S",),
+}
+SSH_COMMAND_SETTINGS = ("proxycommand", "localcommand", "knownhostscommand", "remotecommand")
+REMOTE_SHELLS = ("ssh", "tmux", "screen", "su", "sem", "launchctl")
+
+
+def _command_option_values(program, args):
+    values = []
+    options = COMMAND_OPTIONS.get(program, ())
+    for position, arg in enumerate(args):
+        following = args[position + 1] if position + 1 < len(args) else ""
+        name, equals, value = arg.partition("=")
+        if arg in options:
+            values.append(following)
+        elif arg.startswith("--") and equals and name in options:
+            values.append(value)
+        if program in ("ssh", "scp", "sftp", "rsync") and (arg == "-o" or arg.startswith("-o")):
+            setting = following if arg == "-o" else arg[2:]
+            key, _, command_text = setting.replace(" ", "=", 1).partition("=")
+            if key.strip().lower() in SSH_COMMAND_SETTINGS:
+                values.append(command_text)
+    return values
 
 
 # Programs that run a command given in their arguments, after options and operands of their own.
@@ -908,6 +986,9 @@ def _check_assignment(word, env, ctx):
         return check_command(value.lstrip("|-"), ctx.depth + 1)
     if name in ENV_SOURCED_VARIABLES:
         return check_script(value, [], ctx)
+    if name.startswith("GIT_CONFIG_KEY_") and (
+            value.lower() == "core.hookspath" or value.lower().startswith("alias.")):
+        return check_git_c(value + "=", ctx, from_env=True)
     if name == "GIT_CONFIG_PARAMETERS":
         for pair in re.findall(r"'([^']*)'", value) or [value]:
             message = check_git_c(pair.replace("'='", "="), ctx)
@@ -1012,8 +1093,8 @@ def check_simple(command, depth):
         return None
     if _is_dynamic(base):
         return DYNAMIC_MESSAGE
-    if via_xargs and (base in SHELLS or base in ("eval", ".", "source", "trap", "alias", "hash")
-                      or _is_python(base) or base in INLINE_FLAGS or base in AWKS):
+    if via_xargs and (base in ("eval", ".", "source", "trap", "alias", "hash")
+                      or base in INLINE_FLAGS or base in AWKS):
         return XARGS_MESSAGE.format(base)
     if base == "hash":
         for position, arg in enumerate(args):
@@ -1088,6 +1169,27 @@ def check_simple(command, depth):
                 if message:
                     return message
         return None
+    for option_text in _command_option_values(base, args):
+        message = check_command(option_text, depth + 1)
+        if message:
+            return message
+    if base in ("at", "batch"):
+        if command.stdin and not command.stdin_file:
+            for text in command.stdin:
+                message = check_command(text, depth + 1)
+                if message:
+                    return message
+            return None
+        if "-f" in args or not any(arg in ("-l", "-r", "-c", "-q") for arg in args):
+            return STDIN_SHELL_MESSAGE
+        return None
+    if base in REMOTE_SHELLS:
+        # The remote side joins the words into one shell command.
+        for position in range(len(args)):
+            if " " in args[position] or any(ch in args[position] for ch in ";&|"):
+                message = check_command(" ".join(args[position:]), depth + 1)
+                if message:
+                    return message
     if base in LAUNCHERS:
         # Programs that run another command from their arguments: check every place one can start.
         for position in range(len(args)):
@@ -1127,6 +1229,8 @@ def check_simple(command, depth):
     codes = []
     if _is_python(base):
         scripts, codes = python_targets(args)
+        if via_xargs and (scripts or codes):
+            return XARGS_MESSAGE.format(base)       # python -m MODULE with stdin words is fine
         if any(script == "-" or STDIN_PATHS.match(script) for script, _ in scripts):
             if not command.stdin or command.stdin_file:
                 return _message("unchecked-python", "a python that reads its program from a "
@@ -1168,8 +1272,8 @@ def check_command(command, depth=0):
     except Unparsable as error:
         return _message("unparsable", "the command could not be parsed ({}), so it is not "
                                       "allowed".format(error))
-    for text in texts:
-        for inner in _substitutions(text):
+    for text, shell_quoting in texts:
+        for inner in _substitutions(text, shell_quoting):
             message = check_command(inner, depth + 1)
             if message:
                 return message
