@@ -273,6 +273,10 @@ BLOCKED = [
     ("echo \"$((cd /tmp && ./bootstrap.sh) | head)\"", "bootstrap"),
     ("x=\"$((cd /tmp; ./bootstrap.sh))\"", "bootstrap"),
     ("echo \"$((true); bin/ecc-snapshot)\"", "ecc-snapshot"),
+    ("echo \"$((cd x; $CMD; ./bootstrap.sh) | head)\"", "bootstrap"),
+    ("echo \"$((cd x; eval \"$X\"; ./bootstrap.sh) | head)\"", "bootstrap"),
+    ("echo $((cd x; $CMD; bin/ecc-snapshot) | head)", "ecc-snapshot"),
+    ("echo $((2*3)) && bin/ecc-snapshot", "ecc-snapshot"),
     ("git archive --remote=ext::sh HEAD", "unchecked-git-config"),
     ("*a(<=(sh $((*xargs &bash -c \nin", "unchecked-program"),
     ("rsync -e./bootstrap.sh a host:b", "bootstrap"),
@@ -403,6 +407,10 @@ ALLOWED = [
     "echo hi # it's `./bootstrap.sh`",
     "echo \"$((2*(3+4)))\"",
     "n=\"$((n+1))\"",
+    "echo $((2*3))",
+    "echo $((2*(3+4)))",
+    "x=$((n*(m+1))); echo $x",
+    "for i in $(seq 3); do echo $((i*2)); done",
     "printf '%s\\n' \"$(git log -1 --format='%H (%s)')\"",
 ]
 

@@ -241,12 +241,10 @@ PROCESS_SUBSTITUTION = "/dev/fd/63"
 def split_commands(text):
     """Split a shell command into simple commands.
 
-    Returns (commands, texts). texts holds (source, offset) for every word, and
-    (body, None) for every unquoted here-document body: where a command substitution
-    can hide. The inside of an unquoted $(...), `...`, <(...), >(...) or zsh =(...) becomes
+    The inside of an unquoted $(...), `...`, <(...), >(...) or zsh =(...) becomes
     commands of its own, and the command around it keeps going after it closes.
     """
-    commands, texts, owners = [], [], []
+    commands, owners = [], []
     current = SimpleCommand()
     ends, sources = [], []
     target, last = None, None
@@ -267,18 +265,21 @@ def split_commands(text):
             ends.append(start)
             sources.append("$")
 
-    for token in _tokens(text):
+    tokens = list(_tokens(text))
+    arithmetic = 0  # open ( inside $((...)): scan_substitutions checks that text instead
+    for index, token in enumerate(tokens):
         kind = token[0]
+        if arithmetic:
+            if kind == "op" and token[1] in ("(", ")"):
+                arithmetic += 1 if token[1] == "(" else -1
+            continue
         if kind == "heredoc":
-            _, body, quoted = token
+            _, body, _ = token
             if owners:
                 owners.pop(0).stdin.append(body)
-            if not quoted:
-                texts.append((body.replace("\\\n", ""), None))
             continue
         if kind == "word":
             _, value, source, start, end = token
-            texts.append((source, start))
             last = token
             if target is not None:
                 if target == "<<<":
@@ -301,6 +302,13 @@ def split_commands(text):
         _, piece, start, end = token
         previous, last = last, token
         adjacent = previous is not None and previous[-1] == start
+        if piece == "(" and adjacent and previous[0] == "word" and previous[2].endswith("$") \
+                and index + 1 < len(tokens) and tokens[index + 1][:2] == ("op", "(") \
+                and tokens[index + 1][2] == end:
+            # $((...)) is arithmetic: the word already ends in $, so it reads as an
+            # expansion, and check_command checks the inside as code on its own.
+            arithmetic = 1
+            continue
         if piece == "(" and adjacent and (
                 (previous[0] == "op" and previous[1] in ("<", ">")) or
                 (previous[0] == "word" and (previous[2].endswith("$") or previous[2] == "="))):
@@ -362,7 +370,7 @@ def split_commands(text):
         if outer is not None and outer is not current:
             current = outer
             finish()
-    return commands, texts
+    return commands
 
 
 def _skip_quoted(text, index):
@@ -1442,8 +1450,17 @@ def check_simple(command, depth):
 ANSI_C_ESCAPED_QUOTE = re.compile(r"\$'(?:[^'\\]|\\.)*\\'")
 
 
-def check_command(command, depth=0):
-    """Return a block message for a Bash command string, or None to allow it."""
+UNCHECKED_RULE = re.compile(r"\((unchecked-[a-z-]+|unparsable)\)")
+
+
+def check_command(command, depth=0, arithmetic=False):
+    """Return a block message for a Bash command string, or None to allow it.
+
+    With arithmetic=True the text is the inside of $((...)), which bash runs as a subshell
+    when it is not valid arithmetic. Real arithmetic such as 2*(3+4) gives "unchecked" or
+    "unparsable" verdicts, so those are ignored, but every part is still checked so a
+    later rule match is not hidden behind them.
+    """
     if ANSI_C_ESCAPED_QUOTE.search(command):
         # shlex reads $'\'' as an open quote, so everything after it would be misread.
         return _message("unparsable", "$'...' quoting with an escaped quote cannot be read "
@@ -1452,20 +1469,15 @@ def check_command(command, depth=0):
         return _message("unparsable", "the command nests shells or substitutions too deeply to check")
     try:
         command = join_continuations(command)
-        commands, texts = split_commands(command)
+        commands = split_commands(command)
     except Unparsable as error:
         return _message("unparsable", "the command could not be parsed ({}), so it is not "
                                       "allowed".format(error))
-    for inner in scan_substitutions(command):
-        message = check_command(inner, depth + 1)
-        if message and isinstance(inner, MaybeArithmetic) and re.search(
-                r"\((unchecked-[a-z-]+|unparsable)\)", message):
-            message = None      # real arithmetic such as $((2*(3+4))) is not a command
-        if message:
-            return message
-    for simple in commands:
-        message = check_simple(simple, depth)
-        if message:
+    verdicts = [check_command(inner, depth + 1, isinstance(inner, MaybeArithmetic))
+                for inner in scan_substitutions(command)]
+    verdicts += [check_simple(simple, depth) for simple in commands]
+    for message in verdicts:
+        if message and not (arithmetic and UNCHECKED_RULE.search(message)):
             return message
     return None
 
