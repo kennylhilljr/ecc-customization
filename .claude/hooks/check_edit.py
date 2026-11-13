@@ -241,9 +241,9 @@ PROCESS_SUBSTITUTION = "/dev/fd/63"
 def split_commands(text):
     """Split a shell command into simple commands.
 
-    Returns (commands, texts). texts holds (text, shell_quoting) pairs: the source of
-    every word and every unquoted here-document body, where a command substitution can
-    hide. The inside of an unquoted $(...), `...`, <(...), >(...) or zsh =(...) becomes
+    Returns (commands, texts). texts holds (source, offset) for every word, and
+    (body, None) for every unquoted here-document body: where a command substitution
+    can hide. The inside of an unquoted $(...), `...`, <(...), >(...) or zsh =(...) becomes
     commands of its own, and the command around it keeps going after it closes.
     """
     commands, texts, owners = [], [], []
@@ -274,11 +274,11 @@ def split_commands(text):
             if owners:
                 owners.pop(0).stdin.append(body)
             if not quoted:
-                texts.append((body.replace("\\\n", ""), False))
+                texts.append((body.replace("\\\n", ""), None))
             continue
         if kind == "word":
             _, value, source, start, end = token
-            texts.append((source, True))
+            texts.append((source, start))
             last = token
             if target is not None:
                 if target == "<<<":
@@ -365,34 +365,131 @@ def split_commands(text):
     return commands, texts
 
 
-def _substitutions(text, shell_quoting=True):
-    """Return the text of each $(...) and `...` in a word's source or a here-document body.
-
-    With shell_quoting, single-quoted spans are skipped, as bash does. A $( runs to the
-    last ) in the text, so a ) that closes a case pattern or sits in quotes cannot end it
-    early; any text in between is checked as commands too.
-    """
-    found, index, double = [], 0, False
+def _skip_quoted(text, index):
+    """index is just after an opening double quote; return the index after its close."""
     while index < len(text):
         char = text[index]
-        if text.startswith("$(", index):
-            stop = text.rfind(")")
-            stop = len(text) if stop <= index + 1 else stop
-            found.append(text[index + 2:stop])
-            index = stop + 1
+        if char == "\\":
+            index += 2
+        elif char == '"':
+            return index + 1
+        elif text.startswith("$(", index):
+            index = _substitution_end(text, index + 2) + 1
         elif char == "`":
-            stop = index + 1
-            while stop < len(text) and text[stop] != "`":
-                stop += 2 if text[stop] == "\\" else 1
-            found.append(text[index + 1:stop])
-            index = stop + 1
+            index = _backtick_end(text, index + 1) + 1
+        else:
+            index += 1
+    return len(text)
+
+
+def _backtick_end(text, index):
+    """index is just after an opening backtick; return the index of the closing one."""
+    while index < len(text) and text[index] != "`":
+        index += 2 if text[index] == "\\" else 1
+    return min(index, len(text))
+
+
+HEREDOC_START = re.compile(r"<<(-?)[ \t]*(\\?)(['\"]?)([^\s;&|<>()'\"]*)\3")
+CASE_WORD = re.compile(r"(?<![\w$-])(case|esac)(?![\w-])")
+
+
+def _substitution_end(text, index):
+    """index is just after "$("; return the index of the matching ")" (or len(text)).
+
+    Reads the inside as shell code: quotes, nested substitutions, comments,
+    here-documents and case patterns, whose ) does not close the substitution.
+    """
+    if text.startswith("(", index):      # $(( arithmetic )): plain parentheses
+        depth = 2
+        index += 1
+        while index < len(text):
+            depth += {"(": 1, ")": -1}.get(text[index], 0)
+            if depth == 0:
+                return index
+            index += 1
+        return len(text)
+    depth, cases, pending = 1, [], []
+    word_start = True
+    while index < len(text):
+        char = text[index]
+        if char == "\\":
+            index, word_start = index + 2, False
+            continue
+        if char == "\n" and pending:
+            index = _skip_heredoc_bodies(text, index + 1, pending)
+            pending, word_start = [], True
+            continue
+        if char == "'":
+            close = text.find("'", index + 1)
+            index = len(text) if close < 0 else close + 1
+        elif char == '"':
+            index = _skip_quoted(text, index + 1)
+        elif char == "`":
+            index = _backtick_end(text, index + 1) + 1
+        elif text.startswith("$(", index):
+            index = _substitution_end(text, index + 2) + 1
+        elif char == "#" and word_start:
+            newline = text.find("\n", index)
+            index = len(text) if newline < 0 else newline
+            continue
+        elif text.startswith("<<", index) and not text.startswith("<<<", index):
+            match = HEREDOC_START.match(text, index)
+            if match and match.group(4):
+                pending.append((match.group(4), match.group(1) == "-"))
+                index = match.end()
+            else:
+                index += 2
+        elif word_start and CASE_WORD.match(text, index):
+            word = CASE_WORD.match(text, index).group(1)
+            if word == "case":
+                cases.append(depth)
+            elif cases:
+                cases.pop()
+            index += 4
+        elif char == "(":
+            depth += 1
+            index += 1
+        elif char == ")":
+            if cases and cases[-1] == depth:
+                index += 1      # the end of a case pattern
+            else:
+                depth -= 1
+                if depth == 0:
+                    return index
+                index += 1
+        else:
+            index += 1
+        word_start = char in " \t\n;&|()"
+    return len(text)
+
+
+def _skip_heredoc_bodies(text, index, pending):
+    for delimiter, strip_tabs in pending:
+        while index < len(text):
+            newline = text.find("\n", index)
+            line = text[index:] if newline < 0 else text[index:newline]
+            index = len(text) if newline < 0 else newline + 1
+            if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+                break
+    return index
+
+
+def _substitution_starts(text, shell_quoting=True):
+    """Offsets of the $( and ` that start a command substitution in a word's source, or in
+    a here-document body (shell_quoting False: quotes there are plain text)."""
+    starts, index, double = [], 0, False
+    while index < len(text):
+        char = text[index]
+        if text.startswith("$(", index) or char == "`":
+            starts.append(index)
+            index += 2 if char == "$" else 1
         elif char == "\\":
             index += 2
         elif shell_quoting and char == '"':
             double = not double
             index += 1
         elif shell_quoting and char == "'" and not double:
-            if text.startswith("$'", index - 1) and index > 0:
+            if index > 0 and text[index - 1] == "$":
                 close = index + 1
                 while close < len(text) and text[close] != "'":
                     close += 2 if text[close] == "\\" else 1
@@ -401,6 +498,34 @@ def _substitutions(text, shell_quoting=True):
             index = len(text) if close < 0 else close + 1
         else:
             index += 1
+    return starts
+
+
+def substitutions(command, texts):
+    """The inner text of every command substitution in the words and here-document bodies.
+
+    A substitution is read from the full command text, not the word shlex returned:
+    shlex ends a double-quoted word at the first inner quote, as in "$(echo "a b")".
+    """
+    found, covered = [], -1     # words: the end of the last substitution read from command
+    for text, offset in texts:
+        source = command if offset is not None else text
+        inner_covered = -1
+        for start in _substitution_starts(text, offset is not None):
+            position = start + (offset or 0)
+            if position >= len(source) or position <= (covered if offset is not None
+                                                       else inner_covered):
+                continue    # inside a substitution already read; the recursion checks it
+            if source.startswith("$(", position):
+                stop = _substitution_end(source, position + 2)
+                found.append(source[position + 2:stop])
+            else:
+                stop = _backtick_end(source, position + 1)
+                found.append(source[position + 1:stop])
+            if offset is not None:
+                covered = stop
+            else:
+                inner_covered = stop
     return found
 
 
@@ -881,7 +1006,8 @@ def check_git(args, ctx):
         if ctx.via_xargs:
             return XARGS_MESSAGE.format("git config")
         return check_git_config(rest)
-    if any(arg.startswith("ext::") for arg in rest):
+    if sub in ("clone", "fetch", "pull", "push", "ls-remote", "remote", "submodule", "archive") \
+            and any(arg.lower().startswith("ext::") for arg in rest):
         return _message("unchecked-git-config", "an ext:: remote runs a command the guard "
                                                 "cannot check")
     commands = []
@@ -937,6 +1063,11 @@ def _command_option_values(program, args):
             values.append(following)
         elif arg.startswith("--") and equals and name in options:
             values.append(value)
+        elif arg.startswith("-") and not arg.startswith("--"):
+            for option in options:
+                if len(option) == 2 and option[1] in arg[1:]:
+                    tail = arg[arg.index(option[1], 1) + 1:]
+                    values.append(tail if tail else following)     # -e./x, -ave ./x
         if program in ("ssh", "scp", "sftp", "rsync") and (arg == "-o" or arg.startswith("-o")):
             setting = following if arg == "-o" else arg[2:]
             key, _, command_text = setting.replace(" ", "=", 1).partition("=")
@@ -1272,11 +1403,10 @@ def check_command(command, depth=0):
     except Unparsable as error:
         return _message("unparsable", "the command could not be parsed ({}), so it is not "
                                       "allowed".format(error))
-    for text, shell_quoting in texts:
-        for inner in _substitutions(text, shell_quoting):
-            message = check_command(inner, depth + 1)
-            if message:
-                return message
+    for inner in substitutions(command, texts):
+        message = check_command(inner, depth + 1)
+        if message:
+            return message
     for simple in commands:
         message = check_simple(simple, depth)
         if message:

@@ -259,6 +259,16 @@ BLOCKED = [
      "unchecked-git-config"),
     ("echo ./bootstrap.sh | xargs sh", "unchecked-xargs"),
     ("echo \"it's $(./bootstrap.sh)\"", "bootstrap"),
+    # substitutions read from the full command text
+    ("echo \"$(echo \"a b\"; ./bootstrap.sh)\"", "bootstrap"),
+    ("echo \"$(basename \"$(./bootstrap.sh)\")\"", "bootstrap"),
+    ("echo \"$(cat <<'EOF'\nit's )\nEOF\n./bootstrap.sh)\"", "bootstrap"),
+    ("echo \"$(date)\" \"$(./bootstrap.sh)\"", "bootstrap"),
+    ("echo \"$(date) `./bootstrap.sh`\"", "bootstrap"),
+    ("rsync -e./bootstrap.sh a host:b", "bootstrap"),
+    ("rsync -ave ./bootstrap.sh a host:b", "bootstrap"),
+    ("tar -I./bootstrap.sh -cf a b", "bootstrap"),
+    ("git clone EXT::sh x", "unchecked-git-config"),
     # case-insensitive file systems
     ("ENV ./bootstrap.sh", "bootstrap"),
     ("NOHUP bin/ecc-snapshot", "ecc-snapshot"),
@@ -372,6 +382,13 @@ ALLOWED = [
     "ssh host uptime",
     "rsync -a src/ /tmp/dst/",
     "x=(a b c)",
+    "git commit -m \"$(echo \"a b\")\"",
+    "echo \"$(basename \"$(pwd)\")\"",
+    "x=\"$(echo \"a b\")\"",
+    "git commit -m \"$(cat <<'EOF'\nDocs: don't run `./bootstrap.sh` (really)\n1) item\nEOF\n)\"",
+    "echo \"$((1<<2))\"",
+    "git commit -m 'ext::x'",
+    "tar -xvf x.tar",
 ]
 
 
