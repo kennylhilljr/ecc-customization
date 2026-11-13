@@ -80,7 +80,6 @@ BLOCKED = [
     ("python3 lib/ecctools.py restore --root machine --home /tmp/x --ho=/Users/me", "ecctools"),
     ("python3 lib/ecctools.py restore --root machine --home tmp/x", "ecctools"),
     ("python3 lib/ecctools.py restore --root machine --home ~", "ecctools"),
-    ("python3 lib/ecctools.py restore --root machine --home $TMPDIR/x", "ecctools"),
     ("python3 lib/ecctools.py rest --root machine --home ~", "ecctools"),
     ("python3 lib/ecctools.py openclaw-restore --archive a.tgz --dest /Users/me/.openclaw", "ecctools"),
     ("python3 lib/ecctools.py openclaw-plugin --plugin-dir x --state-dir ~/.openclaw", "ecctools"),
@@ -207,6 +206,41 @@ BLOCKED = [
     ("vim '+!bin/ecc-snapshot' x", "inline-code"),
     ("rg --pre ./bootstrap.sh x .", "bootstrap"),
     ("GIT_SSH=bin/ecc-snapshot git fetch", "ecc-snapshot"),
+    # review round 2
+    ("cat <<- EOF\nx\nEOF\n./bootstrap.sh\n\necho done", "bootstrap"),
+    ("cat <<- 'EOF'\nx\nEOF\n./bootstrap.sh\n\necho done", "bootstrap"),
+    ("bash <<- EOF\n\t./bootstrap.sh\n\tEOF\n\necho done", "bootstrap"),
+    ("echo $'\\'' ; ./bootstrap.sh ; echo $'\\'' #'", "unparsable"),
+    ("git fetch --upload-pack=./bootstrap.sh /tmp/r", "bootstrap"),
+    ("git ls-remote --upload-pack=bin/ecc-snapshot .", "ecc-snapshot"),
+    ("git clone -u ./bootstrap.sh /tmp/r /tmp/q", "bootstrap"),
+    ("git push --receive-pack=./bootstrap.sh", "bootstrap"),
+    ("git archive --remote=/tmp/r --exec=./bootstrap.sh", "bootstrap"),
+    ("git grep -O./bootstrap.sh x", "bootstrap"),
+    ("git rebase -ix ./bootstrap.sh HEAD~1", "bootstrap"),
+    ("git filter-branch --setup ./bootstrap.sh", "bootstrap"),
+    ("git -c core.askPass=./bootstrap.sh fetch", "bootstrap"),
+    ("git --config-env=core.sshCommand=VAR fetch", "unchecked-git-config"),
+    ("GIT_CONFIG_PARAMETERS=\"'core.pager=./bootstrap.sh'\" git log", "bootstrap"),
+    ("xcrun ./bootstrap.sh", "bootstrap"),
+    ("flock /tmp/l ./bootstrap.sh", "bootstrap"),
+    ("ssh localhost ./bootstrap.sh", "bootstrap"),
+    ("npx ./bootstrap.sh", "bootstrap"),
+    ("su root ./bootstrap.sh", "bootstrap"),
+    ("open bin/ecc-snapshot", "ecc-snapshot"),
+    ("uv run python3 lib/ecctools.py snapshot --root /Users/x", "ecctools"),
+    ("pypy3 lib/gh_command_drain.py", "command-drain"),
+    ("python3 -c 'import runpy; runpy.run_path(\"lib/ecctools.py\", run_name=\"__main__\")' "
+     "snapshot --root /Users/x", "inline-code"),
+    ("perl -e 'exec @ARGV' ./bootstrap.sh", "inline-code"),
+    ("ln -s /Users/me /tmp/h && python3 lib/ecctools.py snapshot --root /tmp/r --home /tmp/h",
+     "ecctools"),
+    ("export GIT_SSH_COMMAND=./bootstrap.sh; git fetch", "bootstrap"),
+    ("export BASH_ENV=./bootstrap.sh; bash -c true", "bootstrap"),
+    ("LESSOPEN='|./bootstrap.sh %s' less x", "bootstrap"),
+    ("mapfile -C ./bootstrap.sh -c 1 < x", "bootstrap"),
+    ("TMPDIR=/Users/me python3 lib/ecctools.py restore --root machine --home $TMPDIR/h",
+     "ecctools"),
     # case-insensitive file systems
     ("ENV ./bootstrap.sh", "bootstrap"),
     ("NOHUP bin/ecc-snapshot", "ecc-snapshot"),
@@ -300,7 +334,26 @@ ALLOWED = [
     "echo $((1<<2))",
     "echo `date` ok",
     "echo one \\\n  two",
+    "<(echo) >out",
+    "git fetch origin",
+    "git rebase -i origin/main",
+    "git push -u origin HEAD",
+    "open https://example.com",
+    "uv run pytest -q",
+    "export FOO=bar",
+    "python3 -c 'import sys; print(sys.argv)' a b",
+    "IFS=$'\\n' read -r x <<< y",
+    "cat <<- EOF\n\tit's\n\tEOF\necho ok",
 ]
+
+
+class PreBashTmpdir(unittest.TestCase):
+    def test_tmpdir_paths_follow_the_hook_environment(self):
+        env = dict(os.environ, TMPDIR=tempfile.gettempdir())
+        command = "python3 lib/ecctools.py restore --root machine --home $TMPDIR/h"
+        self.assertEqual(run_hook("pre-bash", bash_payload(command), env=env).returncode, 0)
+        escape = "python3 lib/ecctools.py restore --root machine --home $TMPDIR/../../../Users/me"
+        self.assertEqual(run_hook("pre-bash", bash_payload(escape), env=env).returncode, 2)
 
 
 class PreBashBlocks(unittest.TestCase):

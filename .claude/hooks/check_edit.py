@@ -103,7 +103,7 @@ def _tokens(text):
     """Yield ('word', value, source, start, end), ('op', operator, start, end) and
     ('heredoc', body, quoted) tokens for a shell command."""
     pos = 0
-    pending, expect_delimiter, delimiter_after = [], False, -1
+    pending, expect_delimiter, delimiter_after, strip_dash = [], False, -1, False
     parens, previous = [], None     # open ( kinds, and the last token for adjacency checks
     while pos is not None and pos < len(text):
         stream = io.StringIO(text)
@@ -165,10 +165,16 @@ def _tokens(text):
                             restart = new_pos
                             break
                 continue
+            if expect_delimiter and body == "-" and body_start == delimiter_after:
+                # <<- EOF: the dash belongs to the operator and the delimiter is the next word.
+                strip_dash = True
+                previous = ("word", token, body, body_start, body_start + len(body))
+                continue
             if expect_delimiter:
                 expect_delimiter = False
-                strip_tabs = body_start == delimiter_after and token.startswith("-")
-                delimiter = token[1:] if strip_tabs else token
+                strip_tabs = strip_dash or (body_start == delimiter_after and token.startswith("-"))
+                delimiter = token[1:] if strip_tabs and not strip_dash else token
+                strip_dash = False
                 quoted = any(ch in body for ch in "'\"\\")
                 pending.append((delimiter, quoted, strip_tabs))
             previous = ("word", token, body, body_start, body_start + len(body))
@@ -286,6 +292,8 @@ def split_commands(text):
                 target = None
                 current.stdin_file = current.stdin_file and previous[1] != "<"
                 current.words.append(PROCESS_SUBSTITUTION)
+                ends.append(-1)
+                sources.append(PROCESS_SUBSTITUTION)
             stack.append(("sub", current, ends, sources))
             current, ends, sources = SimpleCommand(), [], []
             continue
@@ -369,9 +377,25 @@ def _temp_roots():
     return roots
 
 
+# The whole Bash command being checked: a temp path is only trusted when the same command
+# does not create links or copy files that could turn it into the real home folder.
+CURRENT = {"command": ""}
+LINKING_WORDS = re.compile(r"(?<![\w.-])(ln|gln|link|symlink|cp|gcp|mv|rsync|ditto|tar|unzip|"
+                           r"bsdtar|cpio|mount|bindfs)(?![\w-])", re.I)
+TMPDIR_PREFIX = re.compile(r"^\$(TMPDIR|\{TMPDIR\})(?=/|$)")
+
+
 def is_temp_path(value):
     """True when value is an absolute path inside /tmp or the system temp folder."""
-    if not isinstance(value, str) or not os.path.isabs(value):
+    if not isinstance(value, str):
+        return False
+    if LINKING_WORDS.search(CURRENT["command"]):
+        return False
+    tmpdir = os.environ.get("TMPDIR")
+    if TMPDIR_PREFIX.match(value) and tmpdir and "TMPDIR" not in TMPDIR_PREFIX.sub("", value) \
+            and not re.search(r"TMPDIR\s*[=+]|-u\s*TMPDIR|unset", CURRENT["command"]):
+        value = TMPDIR_PREFIX.sub(lambda _: tmpdir.rstrip("/"), value, count=1)
+    if not os.path.isabs(value):
         return False
     if any(ch in value for ch in EXPANSION_CHARS + "~\n"):
         return False    # $X, $(...), globs and braces expand to paths the guard cannot see
@@ -541,7 +565,7 @@ INLINE_MARKERS = ("bootstrap.sh", "ecc-snapshot", "openclaw-gh-command-drain", "
 INLINE_FLAGS = {
     "perl": ("-e", "-E"), "ruby": ("-e",), "node": ("-e", "--eval", "-p", "--print"),
     "bun": ("-e", "--eval", "-p", "--print"), "osascript": ("-e",), "php": ("-r",),
-    "expect": ("-c",), "vim": ("-c", "--cmd"), "nvim": ("-c", "--cmd"), "vi": ("-c", "--cmd"),
+    "expect": ("-c",), "lua": ("-e",), "vim": ("-c", "--cmd"), "nvim": ("-c", "--cmd"), "vi": ("-c", "--cmd"),
     "ex": ("-c", "--cmd"), "view": ("-c", "--cmd"),
 }
 EDITORS = ("vim", "nvim", "vi", "ex", "view")
@@ -585,7 +609,7 @@ def _inline_codes(program, args):
 
 
 def _is_python(name):
-    if name in ("python", "python3"):
+    if name in ("python", "python3", "pypy", "pypy3"):
         return True
     return name.startswith("python3.") and name[len("python3."):].isdigit()
 
@@ -619,7 +643,7 @@ def python_targets(args):
                     value = inline or (args[index + 1] if index + 1 < len(args) else "")
                     rest = args[index + 1:] if inline else args[index + 2:]
                     if flag == "c":
-                        return [], [value]
+                        return [], [" ".join([value] + rest)]   # sys.argv follows the code
                     leaf = value.rsplit(".", 1)[-1] + ".py"
                     if leaf in SCRIPT_RULES:
                         return [(leaf, rest)], []
@@ -687,9 +711,12 @@ GIT_VALUE_OPTIONS = ("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--s
                      "--config-env", "--attr-source", "--list-cmds")
 # git config keys whose value is a command git runs.
 GIT_COMMAND_KEYS = re.compile(
-    r"^(core\.(pager|editor|sshcommand|fsmonitor)|sequence\.editor|diff\.external|"
+    r"^(core\.(pager|editor|sshcommand|fsmonitor|askpass|gitproxy)|sequence\.editor|diff\.external|"
     r"gpg(\.[^.]+)?\.program|credential(\..+)?\.helper|pager\..+|filter\..+\.(clean|smudge|process)|"
-    r"merge\..+\.driver|diff\..+\.(command|textconv))$")
+    r"merge\..+\.driver|diff\..+\.(command|textconv)|uploadpack\.packobjectshook|web\.browser|"
+    r"browser\..+\.(cmd|path)|man\..+\.(cmd|path)|remote\..+\.(uploadpack|receivepack|vcs)|"
+    r"sendemail\..*(cccmd|tocmd|sendmailcmd|smtpserver)|difftool\..+\.(cmd|path)|"
+    r"mergetool\..+\.(cmd|path)|core\.hookspath)$")
 GIT_CONFIG_READ_ACTIONS = ("--get", "--get-all", "--get-regexp", "--get-urlmatch", "--get-color",
                            "--get-colorbool", "-l", "--list")
 GIT_CONFIG_SAFE_FLAGS = ("--global", "--system", "--local", "--worktree", "--show-origin",
@@ -703,21 +730,30 @@ GIT_CONFIG_MESSAGE = _message(
                   "Read with --get or --list, or write a scratch file under /tmp with --file")
 ENV_COMMAND_VARIABLES = ("GIT_EDITOR", "GIT_SEQUENCE_EDITOR", "GIT_PAGER", "GIT_SSH_COMMAND", "GIT_SSH",
                          "GIT_EXTERNAL_DIFF", "GIT_ASKPASS", "SSH_ASKPASS", "GIT_PROXY_COMMAND",
-                         "EDITOR", "VISUAL", "PAGER")
+                         "EDITOR", "VISUAL", "PAGER", "LESSOPEN", "LESSCLOSE")
 # Variables naming a file the shell sources before running anything.
 ENV_SOURCED_VARIABLES = ("BASH_ENV", "ENV")
 HASH_MESSAGE = _message("hash", "hash maps a command name to a script the guard protects")
 
 
-def check_git_c(value, ctx):
+def check_git_c(value, ctx, from_env=False):
     key, _, setting = value.partition("=")
     key = key.lower()
     if key.startswith("alias."):
         return _message("unchecked-git-alias", "a git alias set with -c cannot be checked; "
                                                "run the git command it stands for")
     if GIT_COMMAND_KEYS.match(key):
+        if from_env or key == "core.hookspath":
+            return _message("unchecked-git-config", "git -c {} takes a command or hook folder "
+                                                    "the guard cannot see".format(key))
         return check_command(setting.lstrip("!"), ctx.depth + 1)
     return None
+
+
+# Options of git subcommands whose value is a command git runs, and short forms per subcommand.
+GIT_COMMAND_OPTIONS = ("--upload-pack", "--receive-pack", "--exec", "--extcmd",
+                       "--open-files-in-pager", "--setup")
+GIT_SHORT_COMMAND_OPTIONS = {"rebase": "x", "difftool": "x", "clone": "u", "grep": "O"}
 
 
 def _is_scratch_config(path):
@@ -779,6 +815,9 @@ def check_git(args, ctx):
         elif arg.startswith("-C") or arg.startswith("-c"):
             name, value = arg[:2], arg[2:]
             index += 1
+        elif name == "--config-env" and equals:
+            value = inline
+            index += 1
         elif arg.startswith("-"):
             index += 1
             continue
@@ -786,6 +825,10 @@ def check_git(args, ctx):
             break
         if name == "-c":
             message = check_git_c(value, ctx)
+            if message:
+                return message
+        elif name == "--config-env":
+            message = check_git_c(value, ctx, from_env=True)
             if message:
                 return message
     if index >= len(args):
@@ -796,20 +839,21 @@ def check_git(args, ctx):
             return XARGS_MESSAGE.format("git config")
         return check_git_config(rest)
     commands = []
-    if sub in ("rebase", "difftool"):
-        flags = ("-x", "--exec") if sub == "rebase" else ("-x", "--extcmd")
-        for position, arg in enumerate(rest):
-            if arg in flags and position + 1 < len(rest):
-                commands.append(rest[position + 1])
-            elif arg.startswith(flags[1] + "="):
-                commands.append(arg.split("=", 1)[1])
-            elif arg.startswith("-x") and len(arg) > 2:
-                commands.append(arg[2:])
-    elif sub == "filter-branch":
-        for position, arg in enumerate(rest):
-            if arg.endswith("-filter") and arg.startswith("--") and position + 1 < len(rest):
-                commands.append(rest[position + 1])
-    elif sub == "bisect" and rest[:1] == ["run"]:
+    short = GIT_SHORT_COMMAND_OPTIONS.get(sub)
+    for position, arg in enumerate(rest):
+        following = rest[position + 1] if position + 1 < len(rest) else ""
+        name, equals, value = arg.partition("=")
+        if arg.startswith("--") and (name in GIT_COMMAND_OPTIONS or
+                                     (sub == "filter-branch" and name.endswith("-filter"))):
+            commands.append(value if equals else following)
+        elif short and arg.startswith("-") and not arg.startswith("--") and short in arg[1:]:
+            # -x CMD, -xCMD and bundles such as -ix CMD
+            tail = arg[arg.index(short, 1) + 1:]
+            if tail:
+                commands.append(tail)
+            elif short != "O":      # git grep -O alone uses the default pager
+                commands.append(following)
+    if sub == "bisect" and rest[:1] == ["run"]:
         commands.append(" ".join(shlex.quote(word) for word in rest[1:]))
     elif sub == "submodule" and "foreach" in rest:
         tail = rest[rest.index("foreach") + 1:]
@@ -823,6 +867,12 @@ def check_git(args, ctx):
     return None
 
 
+# Programs that run a command given in their arguments, after options and operands of their own.
+LAUNCHERS = ("xcrun", "flock", "fakeroot", "chroot", "entr", "direnv", "npx", "bunx", "pnpx", "pnpm",
+             "npm", "yarn", "uv", "uvx", "poetry", "pipenv", "pdm", "hatch", "rye", "conda", "mamba",
+             "pixi", "mise", "asdf", "devbox", "ssh", "tmux", "screen", "launchctl", "su", "sem",
+             "open", "firejail", "systemd-run", "strace", "ltrace", "dtruss", "valgrind", "gdb",
+             "lldb", "nix-shell", "run-one", "unshare", "proxychains", "proxychains4", "tsp")
 WRAPPERS = ("env", "time", "busybox", "noglob", "nocorrect", "-", "sandbox-exec", "sudo", "doas", "nohup", "command", "exec", "nice", "ionice", "caffeinate",
             "xargs", "timeout", "gtimeout", "watch", "arch", "setsid", "stdbuf", "taskpolicy",
             "unbuffer", "builtin", "script", "coproc", "chronic")
@@ -848,6 +898,24 @@ WRAPPER_VALUE_OPTIONS = {
 }
 
 
+def _check_assignment(word, env, ctx):
+    """Record NAME=value in env and check variables whose value is a command or a script."""
+    name, _, value = word.partition("=")
+    name = name.rstrip("+")
+    env[name] = value
+    if name in ENV_COMMAND_VARIABLES or name.startswith("GIT_CONFIG_VALUE_") or \
+            name.startswith("BASH_FUNC_"):
+        return check_command(value.lstrip("|-"), ctx.depth + 1)
+    if name in ENV_SOURCED_VARIABLES:
+        return check_script(value, [], ctx)
+    if name == "GIT_CONFIG_PARAMETERS":
+        for pair in re.findall(r"'([^']*)'", value) or [value]:
+            message = check_git_c(pair.replace("'='", "="), ctx)
+            if message:
+                return message
+    return None
+
+
 def check_simple(command, depth):
     """Return a block message for one simple command, or None."""
     words = command.words
@@ -862,18 +930,9 @@ def check_simple(command, depth):
         elif word == "repeat" and wrapper is None:
             index += 2      # zsh: repeat COUNT command
         elif _is_assignment(word) or (wrapper == "env" and "=" in word and not word.startswith("-")):
-            name, _, value = word.partition("=")
-            name = name.rstrip("+")
-            env[name] = value
-            if name in ENV_COMMAND_VARIABLES or name.startswith("GIT_CONFIG_VALUE_") or \
-                    name.startswith("BASH_FUNC_"):
-                message = check_command(value, depth + 1)
-                if message:
-                    return message
-            if name in ENV_SOURCED_VARIABLES:
-                message = check_script(value, [], Context(env, via_xargs, depth))
-                if message:
-                    return message
+            message = _check_assignment(word, env, Context(env, via_xargs, depth))
+            if message:
+                return message
             index += 1
         elif base in WRAPPERS and (wrapper is None or not word.startswith("-")):
             if base in ("sudo", "doas"):
@@ -989,6 +1048,18 @@ def check_simple(command, depth):
         if args and not args[0].startswith("-"):
             return check_command(args[0], depth + 1)
         return None
+    if base in ("export", "declare", "typeset", "local", "readonly"):
+        for arg in args:
+            if "=" in arg and not arg.startswith("-"):
+                message = _check_assignment(arg, env, ctx)
+                if message:
+                    return message
+        return None
+    if base in ("mapfile", "readarray", "compgen", "complete"):
+        for position, arg in enumerate(args):
+            if arg == "-C" and position + 1 < len(args):
+                return check_command(args[position + 1], depth + 1)
+        return None
     if base == "alias":
         # shopt -s expand_aliases makes a later line run the alias.
         for arg in args:
@@ -1005,7 +1076,6 @@ def check_simple(command, depth):
                 return check_command(args[position + 1], depth + 1)
             if arg.startswith("--command="):
                 return check_command(arg.split("=", 1)[1], depth + 1)
-        return None
     if base in ("rg", "ripgrep"):
         for position, arg in enumerate(args):
             runner = None
@@ -1017,6 +1087,15 @@ def check_simple(command, depth):
                 message = check_script(runner, ["FILE"], ctx)
                 if message:
                     return message
+        return None
+    if base in LAUNCHERS:
+        # Programs that run another command from their arguments: check every place one can start.
+        for position in range(len(args)):
+            inner = SimpleCommand()
+            inner.words = args[position:]
+            message = check_simple(inner, depth + 1)
+            if message:
+                return message
         return None
     if base == "parallel":
         # GNU parallel runs the words before ::: as a command; check every place one can start.
@@ -1059,7 +1138,10 @@ def check_simple(command, depth):
             if message:
                 return message
     elif base in INLINE_FLAGS or base in AWKS:
-        codes = _inline_codes(base, args) + list(command.stdin)
+        codes = _inline_codes(base, args)
+        if codes:
+            codes.append(" ".join(args))    # the code can read its arguments
+        codes += list(command.stdin)
     for code in codes:
         message = check_inline_code(code)
         if message:
@@ -1069,8 +1151,15 @@ def check_simple(command, depth):
     return check_script(program, args, ctx)
 
 
+ANSI_C_ESCAPED_QUOTE = re.compile(r"\$'(?:[^'\\]|\\.)*\\'")
+
+
 def check_command(command, depth=0):
     """Return a block message for a Bash command string, or None to allow it."""
+    if ANSI_C_ESCAPED_QUOTE.search(command):
+        # shlex reads $'\'' as an open quote, so everything after it would be misread.
+        return _message("unparsable", "$'...' quoting with an escaped quote cannot be read "
+                                      "reliably, so the command is not allowed")
     if depth > MAX_DEPTH:
         return _message("unparsable", "the command nests shells or substitutions too deeply to check")
     try:
@@ -1101,7 +1190,11 @@ def pre_bash(payload):
     command = tool_input.get("command")
     if not isinstance(command, str):
         return 0, ""
-    message = check_command(command)
+    CURRENT["command"] = command
+    try:
+        message = check_command(command)
+    finally:
+        CURRENT["command"] = ""
     return (2, message) if message else (0, "")
 
 
