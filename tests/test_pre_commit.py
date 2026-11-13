@@ -1,5 +1,6 @@
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -151,6 +152,54 @@ class PreCommitHookTest(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0, r.stderr)
         with open(os.path.join(repo, "docs", "f.txt"), encoding="utf-8") as fh:
             self.assertEqual(fh.read(), "unstaged edit\n")
+
+    def _failing_git(self, subcommand):
+        # Git puts its exec directory first on PATH for hooks, so a PATH
+        # wrapper would be bypassed; the hook calls ECC_PRECOMMIT_GIT instead.
+        real_git = shutil.which("git")
+        self.assertIsNotNone(real_git)
+        stub_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, stub_dir, ignore_errors=True)
+        log = os.path.join(stub_dir, "git.log")
+        stub = os.path.join(stub_dir, "git")
+        with open(stub, "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/sh\n"
+                     f"printf '%s\\n' \"$*\" >> {shlex.quote(log)}\n"
+                     f"if [ \"$1\" = {shlex.quote(subcommand)} ]; then exit 1; fi\n"
+                     f"exec {shlex.quote(real_git)} \"$@\"\n")
+        os.chmod(stub, 0o755)
+        return stub, log
+
+    def _commit_with_git(self, repo, stub):
+        return self._git(repo, "commit", "-q", "-m", "test",
+                         extra_env={"ECC_PRECOMMIT_GIT": stub})
+
+    def _assert_failed_without_commit(self, repo, result, message, log, subcommand):
+        self.assertNotEqual(result.returncode, 0, result.stderr)
+        self.assertIn(message, result.stderr.decode(errors="replace"))
+        self.assertNotIn(_token().encode(), result.stdout + result.stderr)
+        self.assertNotEqual(self._git(repo, "rev-parse", "-q", "--verify", "HEAD").returncode, 0)
+        with open(log, encoding="utf-8") as fh:
+            calls = [line.split(" ", 1)[0] for line in fh.read().splitlines()]
+        self.assertIn(subcommand, calls)
+
+    def test_refuses_when_listing_staged_files_fails(self):
+        repo = self._repo()
+        self._write(repo, "plain.md", _token() + "\n")
+        self._ok(repo, "add", "plain.md")
+        stub, log = self._failing_git("diff")
+        r = self._commit_with_git(repo, stub)
+        self._assert_failed_without_commit(
+            repo, r, "pre-commit: could not list staged files", log, "diff")
+
+    def test_refuses_when_copying_staged_file_fails(self):
+        repo = self._repo()
+        self._write(repo, "a b.md", _token() + "\n")
+        self._ok(repo, "add", "--", "a b.md")
+        stub, log = self._failing_git("show")
+        r = self._commit_with_git(repo, stub)
+        self._assert_failed_without_commit(
+            repo, r, "pre-commit: could not read staged content for a b.md", log, "show")
 
     def test_checkout_shared_config_is_untouched(self):
         # Linked worktrees share one config file; the hook tests must only
