@@ -270,6 +270,9 @@ BLOCKED = [
     ("echo \"$(cat <<'A B'\n)\nA B\n; ./bootstrap.sh)\"", "bootstrap"),
     ("cat <<EOF\nit's $(./bootstrap.sh)\nEOF", "bootstrap"),
     ("echo $(( $(./bootstrap.sh) + 1 ))", "bootstrap"),
+    ("echo \"$((cd /tmp && ./bootstrap.sh) | head)\"", "bootstrap"),
+    ("x=\"$((cd /tmp; ./bootstrap.sh))\"", "bootstrap"),
+    ("echo \"$((true); bin/ecc-snapshot)\"", "ecc-snapshot"),
     ("git archive --remote=ext::sh HEAD", "unchecked-git-config"),
     ("*a(<=(sh $((*xargs &bash -c \nin", "unchecked-program"),
     ("rsync -e./bootstrap.sh a host:b", "bootstrap"),
@@ -398,6 +401,8 @@ ALLOWED = [
     "tar -xvf x.tar",
     "cat > /tmp/x <<'EOF'\nit's `./bootstrap.sh` $(./bootstrap.sh)\nEOF",
     "echo hi # it's `./bootstrap.sh`",
+    "echo \"$((2*(3+4)))\"",
+    "n=\"$((n+1))\"",
     "printf '%s\\n' \"$(git log -1 --format='%H (%s)')\"",
 ]
 

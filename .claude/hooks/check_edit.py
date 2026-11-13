@@ -496,12 +496,17 @@ def _scan_double(text, index, found):
     return len(text)
 
 
+class MaybeArithmetic(str):
+    """The inside of $((...)): arithmetic, unless bash falls back to a subshell in a command
+    substitution, as for "$((cd x; ./script) | head)". Only a rule match blocks it."""
+
+
 def _collect_substitution(text, index, found):
     """index is at "$("; collect the inside and return the index after the closing ")"."""
     stop = _substitution_end(text, index + 2)
     if text.startswith("$((", index):
-        # Arithmetic: only the substitutions inside it run commands.
         found.extend(scan_substitutions(text[index + 3:max(index + 3, stop - 1)], quoting=False))
+        found.append(MaybeArithmetic(text[index + 2:stop]))
     else:
         found.append(text[index + 2:stop])
     return stop + 1
@@ -1453,6 +1458,9 @@ def check_command(command, depth=0):
                                       "allowed".format(error))
     for inner in scan_substitutions(command):
         message = check_command(inner, depth + 1)
+        if message and isinstance(inner, MaybeArithmetic) and re.search(
+                r"\((unchecked-[a-z-]+|unparsable)\)", message):
+            message = None      # real arithmetic such as $((2*(3+4))) is not a command
         if message:
             return message
     for simple in commands:
