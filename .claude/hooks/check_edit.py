@@ -402,21 +402,92 @@ HEREDOC_START = re.compile(
 CASE_WORD = re.compile(r"(?<![\w$-])(case|esac)(?![\w-])")
 
 
+def _parameter_end(text, index):
+    """index is just after "${"; return the index of the matching "}" (or len(text))."""
+    depth = 1
+    while index < len(text):
+        char = text[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == "'":
+            close = text.find("'", index + 1)
+            index = len(text) if close < 0 else close + 1
+            continue
+        if char == '"':
+            index = _skip_quoted(text, index + 1)
+            continue
+        if char == "`":
+            index = _backtick_end(text, index + 1) + 1
+            continue
+        if text.startswith("$(", index):
+            index = _substitution_end(text, index + 2) + 1
+            continue
+        if text.startswith("${", index):
+            depth += 1
+            index += 2
+            continue
+        if char == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+        index += 1
+    return len(text)
+
+
+def _arithmetic_end(text, index):
+    """index is just after "$(". Return the index of the closing ")" of $(( arithmetic )),
+    or None when the text is not arithmetic.
+
+    Like bash and zsh, the text is arithmetic only when the ( after $( closes just before
+    the final ")", as in $((2*(3+4))). Parentheses that are escaped, quoted or inside a
+    nested substitution or ${...} do not count. Otherwise, as in $(($X) | head), the ( opens a
+    subshell inside a command substitution and the text is shell code.
+    """
+    if not text.startswith("(", index):
+        return None
+    depth = 2
+    position = index + 1
+    while position < len(text):
+        char = text[position]
+        if char == "\\":
+            position += 2
+            continue
+        if char == "'":
+            close = text.find("'", position + 1)
+            position = len(text) if close < 0 else close + 1
+            continue
+        if char == '"':
+            position = _skip_quoted(text, position + 1)
+            continue
+        if char == "`":
+            position = _backtick_end(text, position + 1) + 1
+            continue
+        if text.startswith("$(", position):
+            position = _substitution_end(text, position + 2) + 1
+            continue
+        if text.startswith("${", position):
+            position = _parameter_end(text, position + 2) + 1
+            continue
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 1:
+                return position + 1 if text.startswith(")", position + 1) else None
+        position += 1
+    return len(text)
+
+
 def _substitution_end(text, index):
     """index is just after "$("; return the index of the matching ")" (or len(text)).
 
     Reads the inside as shell code: quotes, nested substitutions, comments,
     here-documents and case patterns, whose ) does not close the substitution.
     """
-    if text.startswith("(", index):      # $(( arithmetic )): plain parentheses
-        depth = 2
-        index += 1
-        while index < len(text):
-            depth += {"(": 1, ")": -1}.get(text[index], 0)
-            if depth == 0:
-                return index
-            index += 1
-        return len(text)
+    arithmetic = _arithmetic_end(text, index)
+    if arithmetic is not None:
+        return arithmetic
     depth, cases, pending = 1, [], []
     word_start = True
     while index < len(text):
@@ -437,6 +508,8 @@ def _substitution_end(text, index):
             index = _backtick_end(text, index + 1) + 1
         elif text.startswith("$(", index):
             index = _substitution_end(text, index + 2) + 1
+        elif text.startswith("${", index):
+            index = _parameter_end(text, index + 2) + 1
         elif char == "#" and word_start:
             newline = text.find("\n", index)
             index = len(text) if newline < 0 else newline
@@ -505,14 +578,16 @@ def _scan_double(text, index, found):
 
 
 class MaybeArithmetic(str):
-    """The inside of $((...)): arithmetic, unless bash falls back to a subshell in a command
-    substitution, as for "$((cd x; ./script) | head)". Only a rule match blocks it."""
+    """The inside of $(( ... )) that closes like arithmetic. Real arithmetic such as
+    2*(3+4) reads as unchecked code, so only a rule match blocks it. A $((...)) whose
+    first ( closes earlier, as in "$((cd x; $CMD) | head)", is a subshell and is checked
+    like any other command substitution."""
 
 
 def _collect_substitution(text, index, found):
     """index is at "$("; collect the inside and return the index after the closing ")"."""
     stop = _substitution_end(text, index + 2)
-    if text.startswith("$((", index):
+    if _arithmetic_end(text, index + 2) is not None:
         found.extend(scan_substitutions(text[index + 3:max(index + 3, stop - 1)], quoting=False))
         found.append(MaybeArithmetic(text[index + 2:stop]))
     else:
@@ -1456,8 +1531,9 @@ UNCHECKED_RULE = re.compile(r"\((unchecked-[a-z-]+|unparsable)\)")
 def check_command(command, depth=0, arithmetic=False):
     """Return a block message for a Bash command string, or None to allow it.
 
-    With arithmetic=True the text is the inside of $((...)), which bash runs as a subshell
-    when it is not valid arithmetic. Real arithmetic such as 2*(3+4) gives "unchecked" or
+    With arithmetic=True the text is the inside of a $(( ... )) that closes like arithmetic
+    (see _arithmetic_end); bash reports an error for it rather than running it when it is
+    not valid arithmetic. Real arithmetic such as 2*(3+4) gives "unchecked" or
     "unparsable" verdicts, so those are ignored, but every part is still checked so a
     later rule match is not hidden behind them.
     """
