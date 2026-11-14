@@ -402,13 +402,46 @@ HEREDOC_START = re.compile(
 CASE_WORD = re.compile(r"(?<![\w$-])(case|esac)(?![\w-])")
 
 
+def _parameter_end(text, index):
+    """index is just after "${"; return the index of the matching "}" (or len(text))."""
+    depth = 1
+    while index < len(text):
+        char = text[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == "'":
+            close = text.find("'", index + 1)
+            index = len(text) if close < 0 else close + 1
+            continue
+        if char == '"':
+            index = _skip_quoted(text, index + 1)
+            continue
+        if char == "`":
+            index = _backtick_end(text, index + 1) + 1
+            continue
+        if text.startswith("$(", index):
+            index = _substitution_end(text, index + 2) + 1
+            continue
+        if text.startswith("${", index):
+            depth += 1
+            index += 2
+            continue
+        if char == "}":
+            depth -= 1
+            if depth == 0:
+                return index
+        index += 1
+    return len(text)
+
+
 def _arithmetic_end(text, index):
     """index is just after "$(". Return the index of the closing ")" of $(( arithmetic )),
     or None when the text is not arithmetic.
 
     Like bash and zsh, the text is arithmetic only when the ( after $( closes just before
     the final ")", as in $((2*(3+4))). Parentheses that are escaped, quoted or inside a
-    nested substitution do not count. Otherwise, as in $(($X) | head), the ( opens a
+    nested substitution or ${...} do not count. Otherwise, as in $(($X) | head), the ( opens a
     subshell inside a command substitution and the text is shell code.
     """
     if not text.startswith("(", index):
@@ -432,6 +465,9 @@ def _arithmetic_end(text, index):
             continue
         if text.startswith("$(", position):
             position = _substitution_end(text, position + 2) + 1
+            continue
+        if text.startswith("${", position):
+            position = _parameter_end(text, position + 2) + 1
             continue
         if char == "(":
             depth += 1
@@ -472,6 +508,8 @@ def _substitution_end(text, index):
             index = _backtick_end(text, index + 1) + 1
         elif text.startswith("$(", index):
             index = _substitution_end(text, index + 2) + 1
+        elif text.startswith("${", index):
+            index = _parameter_end(text, index + 2) + 1
         elif char == "#" and word_start:
             newline = text.find("\n", index)
             index = len(text) if newline < 0 else newline
