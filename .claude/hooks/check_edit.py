@@ -407,7 +407,8 @@ def _arithmetic_end(text, index):
     or None when the text is not arithmetic.
 
     Like bash and zsh, the text is arithmetic only when the ( after $( closes just before
-    the final ")", as in $((2*(3+4))). Otherwise, as in $(($X) | head), the ( opens a
+    the final ")", as in $((2*(3+4))). Parentheses that are escaped, quoted or inside a
+    nested substitution do not count. Otherwise, as in $(($X) | head), the ( opens a
     subshell inside a command substitution and the text is shell code.
     """
     if not text.startswith("(", index):
@@ -415,9 +416,29 @@ def _arithmetic_end(text, index):
     depth = 2
     position = index + 1
     while position < len(text):
-        depth += {"(": 1, ")": -1}.get(text[position], 0)
-        if depth == 1 and text[position] == ")":
-            return position + 1 if text.startswith(")", position + 1) else None
+        char = text[position]
+        if char == "\\":
+            position += 2
+            continue
+        if char == "'":
+            close = text.find("'", position + 1)
+            position = len(text) if close < 0 else close + 1
+            continue
+        if char == '"':
+            position = _skip_quoted(text, position + 1)
+            continue
+        if char == "`":
+            position = _backtick_end(text, position + 1) + 1
+            continue
+        if text.startswith("$(", position):
+            position = _substitution_end(text, position + 2) + 1
+            continue
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 1:
+                return position + 1 if text.startswith(")", position + 1) else None
         position += 1
     return len(text)
 

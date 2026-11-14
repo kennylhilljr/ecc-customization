@@ -284,6 +284,7 @@ BLOCKED = [
     ("echo $(($CMD) | head)", "unchecked-program"),
     ("echo \"$((cd x; $CMD) )\"", "unchecked-program"),
     ("echo \"$((echo \")\") | ./bootstrap.sh)\"", "bootstrap"),
+    ("echo \"$((echo \\(; $CMD); echo \\))\"", "unchecked-program"),
     ("git archive --remote=ext::sh HEAD", "unchecked-git-config"),
     ("*a(<=(sh $((*xargs &bash -c \nin", "unchecked-program"),
     ("rsync -e./bootstrap.sh a host:b", "bootstrap"),
@@ -422,6 +423,7 @@ ALLOWED = [
     "echo $(( (i+1) % (n) ))",
     "echo \"$(( a ? (b) : (c) ))\"",
     "echo $(((1+2)*3))",
+    "echo $(( $(printf %s \")\" >/dev/null; printf 1) + 1 ))",
     "X=3; echo \"$(($X*2))\" \"$(( ($X) ))\"",
     "printf '%s\\n' \"$(git log -1 --format='%H (%s)')\"",
 ]
