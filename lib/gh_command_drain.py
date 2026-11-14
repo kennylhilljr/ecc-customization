@@ -512,8 +512,14 @@ def select(comments, repo, window_start, window_end, state):
 
 # ---------------------------------------------------------------- agent
 
+# Every bot shares one Slack identity, so each message names its source in its first characters.
+ALERT_TAG = "[gh-command-drain]"
+REPLY_TAG = "[ops]"
+
+
 def message_text(repo, number, url, body):
-    return (f"Verified GitHub command from {TRUSTED_LOGIN} (the drain checked the author with the GitHub API).\n"
+    return (f"Start your Slack reply with {REPLY_TAG} so it names the bot it comes from.\n"
+            f"Verified GitHub command from {TRUSTED_LOGIN} (the drain checked the author with the GitHub API).\n"
             f"Comment: {url}\nOn: {repo}#{number}\n\n{body}")
 
 
@@ -582,7 +588,7 @@ def gateway_reachable(run):
 
 def send_alert(url, detail, run):
     """Tell the owner in Slack that a comment was left pending. A failure is only logged."""
-    text = (f"openclaw-gh-command-drain: the ops agent run for {url} did not finish cleanly ({detail}). "
+    text = (f"{ALERT_TAG} openclaw-gh-command-drain: the ops agent run for {url} did not finish cleanly ({detail}). "
             f"It was not resent. If nothing was posted, run: openclaw-gh-command-drain --retry-pending")
     argv = [openclaw_bin(), "message", "send", "--channel", "slack", "--target", f"channel:{ALERT_CHANNEL}",
             "-m", text]

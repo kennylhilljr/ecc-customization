@@ -348,7 +348,9 @@ class DrainTest(unittest.TestCase):
         self.assertFalse(os.path.exists(path))
         self.assertEqual(self.listing(self.deferred), [])
         (argv, msg, mode), = self.agent_runs()
-        self.assertEqual(msg, "Verified GitHub command from kennylhilljr (the drain checked the author with the "
+        self.assertTrue(msg.startswith("Start your Slack reply with [ops] "))
+        self.assertEqual(msg, "Start your Slack reply with [ops] so it names the bot it comes from.\n"
+                              "Verified GitHub command from kennylhilljr (the drain checked the author with the "
                               "GitHub API).\nComment: https://github.com/octo/app/issues/7#issuecomment-105\n"
                               "On: octo/app#7\n\nHey @OpenClaw rebase this\nplease")
         self.assertEqual(mode, "-rw-------")
@@ -597,7 +599,8 @@ class DrainTest(unittest.TestCase):
         url = "https://github.com/octo/app/issues/7#issuecomment-530"
         self.assertEqual(self.alerts(), [[
             "message", "send", "--channel", "slack", "--target", "channel:C0CERFQ8UJV", "-m",
-            f"openclaw-gh-command-drain: the ops agent run for {url} did not finish cleanly ({detail}). "
+            f"[gh-command-drain] openclaw-gh-command-drain: the ops agent run for {url} did not finish cleanly "
+            f"({detail}). "
             f"It was not resent. If nothing was posted, run: openclaw-gh-command-drain --retry-pending"]])
         state = self.load_state()
         self.assertEqual(list(state["pending"]["octo/app"]), ["issue_comment:530"])
