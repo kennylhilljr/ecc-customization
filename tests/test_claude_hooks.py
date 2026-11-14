@@ -436,8 +436,45 @@ class PreBashTmpdir(unittest.TestCase):
         env = dict(os.environ, TMPDIR=tempfile.gettempdir())
         command = "python3 lib/ecctools.py restore --root machine --home $TMPDIR/h"
         self.assertEqual(run_hook("pre-bash", bash_payload(command), env=env).returncode, 0)
-        escape = "python3 lib/ecctools.py restore --root machine --home $TMPDIR/../../../Users/me"
+        # Climb to / however deep TMPDIR is, so the path really is /Users/me.
+        depth = len(os.path.realpath(env["TMPDIR"]).strip(os.sep).split(os.sep))
+        escape = "python3 lib/ecctools.py restore --root machine --home $TMPDIR" + \
+            "/.." * (depth + 1) + "/Users/me"
         self.assertEqual(run_hook("pre-bash", bash_payload(escape), env=env).returncode, 2)
+
+    def test_a_disposable_home_under_tmp_keeps_tmp_paths_but_not_the_home(self):
+        # scripts/check.sh runs the suite with HOME and TMPDIR inside /tmp/ecc-check.XXXXXX.
+        with tempfile.TemporaryDirectory(dir="/tmp") as base:
+            home = os.path.join(base, "home")
+            os.makedirs(home)
+            env = dict(os.environ, HOME=home, TMPDIR=base)
+            for command in [c for c in ALLOWED if "/tmp/" in c]:
+                with self.subTest(command=command):
+                    result = run_hook("pre-bash", bash_payload(command), env=env)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+            for target in (home, os.path.join(home, ".openclaw"), base, "/tmp",
+                           os.path.join(base, "x", "..", "home"), "$TMPDIR/home"):
+                command = "python3 lib/ecctools.py restore --root machine --home " + target
+                with self.subTest(command=command):
+                    result = run_hook("pre-bash", bash_payload(command), env=env)
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertIn("(ecctools)", result.stderr)
+
+    def test_a_tmpdir_holding_the_home_outside_tmp_is_still_not_a_temp_root(self):
+        if not os.access("/var/tmp", os.W_OK) or \
+                os.path.realpath("/var/tmp").startswith(os.path.realpath("/tmp") + os.sep):
+            self.skipTest("needs a writable /var/tmp outside /tmp")
+        with tempfile.TemporaryDirectory(dir="/var/tmp") as base:
+            home = os.path.join(base, "home")
+            os.makedirs(home)
+            env = dict(os.environ, HOME=home, TMPDIR=base)
+            for target in (os.path.join(base, "other"), "$TMPDIR/other"):
+                command = "python3 lib/ecctools.py restore --root machine --home " + target
+                with self.subTest(command=command):
+                    result = run_hook("pre-bash", bash_payload(command), env=env)
+                    self.assertEqual(result.returncode, 2, result.stderr)
+            command = "python3 lib/ecctools.py restore --root machine --home /tmp/x --dry-run"
+            self.assertEqual(run_hook("pre-bash", bash_payload(command), env=env).returncode, 0)
 
 
 class PreBashBlocks(unittest.TestCase):
