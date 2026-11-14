@@ -667,13 +667,26 @@ def _collect_heredocs(text, index, pending, found):
 
 # ---------------------------------------------------------------- paths
 
+def _inside(path, root):
+    return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
+
+
+def _home():
+    return os.path.realpath(os.path.expanduser("~"))
+
+
 def _temp_roots():
     roots = set()
-    home = os.path.realpath(os.path.expanduser("~"))
+    home = _home()
+    fixed_tmp = os.path.realpath("/tmp")
     for candidate in ("/tmp", tempfile.gettempdir()):
         real = os.path.realpath(candidate)
-        # A TMPDIR of / or of a folder holding the home folder would allow everything.
-        if real == os.sep or home == real or home.startswith(real.rstrip(os.sep) + os.sep):
+        if real == os.sep or home == real:
+            continue
+        # A TMPDIR holding the home folder (say /Users) would allow other homes, so it is
+        # dropped. /tmp itself stays a root when a disposable HOME sits under it, as in the
+        # check.sh fixtures; is_temp_path then rejects paths in it that overlap that home.
+        if _inside(home, real) and not _inside(real, fixed_tmp):
             continue
         roots.add(real)
     return roots
@@ -702,8 +715,16 @@ def is_temp_path(value):
     if any(ch in value for ch in EXPANSION_CHARS + "~\n"):
         return False    # $X, $(...), globs and braces expand to paths the guard cannot see
     real = os.path.realpath(value)
-    return any(real == root or real.startswith(root.rstrip(os.sep) + os.sep)
-               for root in _temp_roots())
+    home = _home()
+    for root in _temp_roots():
+        if not _inside(real, root):
+            continue
+        # Under a root that holds the home folder, skip the home, folders inside it and
+        # folders holding it. A TMPDIR inside the home folder (~/.openclaw/tmp) stays usable.
+        if _inside(home, root) and (_inside(real, home) or _inside(home, real)):
+            continue
+        return True
+    return False
 
 
 def _base(word):
