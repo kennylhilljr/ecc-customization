@@ -1,6 +1,6 @@
 # Check workflow
 
-`.github/workflows/check.yml` runs `sh scripts/check.sh` for every pull request and every push to `main`. It runs on macOS with Python 3.9 and Python 3.13. With `fail-fast: false`, a failure on one Python version does not cancel the other job. A new push to a pull request cancels that pull request's unfinished run; every push to `main` runs to completion.
+`.github/workflows/check.yml` runs `sh scripts/check.sh` for every pull request and every push to `main`. It runs on macOS with Python 3.9 and Python 3.13. With `fail-fast: false`, a failure on one Python version does not cancel the other job. A new push to a pull request cancels that pull request's unfinished run; each push to `main` runs in its own concurrency group, so none is cancelled or replaced.
 
 The workflow has read-only `contents` permission, does not keep the checkout credentials, uses no secrets and pins each action to a full commit SHA, with the release tag in a comment. To update an action, replace both the SHA and the tag comment.
 

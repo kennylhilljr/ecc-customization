@@ -13,8 +13,10 @@ permissions:
   contents: read
 
 concurrency:
-  group: check-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # One group per pull request, so a new push cancels its older run. Each
+  # push to main gets its own group, so no main run is cancelled or replaced.
+  group: check-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
 
 jobs:
   check:

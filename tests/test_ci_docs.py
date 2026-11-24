@@ -50,7 +50,7 @@ class CheckWorkflow(unittest.TestCase):
         self.sections = {}
         current = None
         for line in self.workflow.splitlines():
-            if not line.strip() or line.startswith("#"):
+            if not line.strip() or line.lstrip().startswith("#"):
                 continue
             self.assertNotIn("\t", line)
             if not line.startswith(" "):
@@ -125,8 +125,9 @@ class CheckWorkflow(unittest.TestCase):
     def test_only_pull_request_runs_are_cancelled(self):
         self.assertEqual(self.sections["concurrency"], [
             "concurrency:",
-            "  group: check-${{ github.ref }}",
-            "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
+            "  group: check-${{ github.event_name == 'pull_request'"
+            " && github.ref || github.run_id }}",
+            "  cancel-in-progress: true",
         ])
 
     def test_node_version_matches_stack(self):
