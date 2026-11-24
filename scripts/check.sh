@@ -86,6 +86,10 @@ python_syntax() {
 }
 
 ruff_lint() {
+    if ! command -v ruff >/dev/null 2>&1; then
+        printf 'check: ruff is not on PATH; install it with brew install ruff (bootstrap.sh does) or pip install ruff\n' >&2
+        return 1
+    fi
     ruff check --no-cache --quiet .
 }
 
@@ -97,11 +101,7 @@ run_check unit-tests python3 -m unittest discover -s tests
 run_check bash-syntax bash_syntax
 run_check sh-syntax sh_syntax
 run_check python-syntax python_syntax
-if command -v ruff >/dev/null 2>&1; then
-    run_check ruff-lint ruff_lint
-else
-    printf 'SKIP ruff-lint (ruff is not available)\n'
-fi
+run_check ruff-lint ruff_lint
 run_check ecctools-help python3 lib/ecctools.py --help
 run_check kit-help bin/ecc-kit new --help
 run_check bootstrap-help ./bootstrap.sh --help

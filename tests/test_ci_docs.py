@@ -108,6 +108,7 @@ class CIDocs(unittest.TestCase):
             "      - uses: actions/setup-node@v4",
             "        with:",
             "          node-version: '24'",
+            "      - run: python -m pip install ruff==0.15.1",
             "      - run: sh scripts/check.sh",
         ])
 

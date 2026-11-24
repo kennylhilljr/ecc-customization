@@ -198,7 +198,7 @@ class CheckScript(unittest.TestCase):
         self.assert_failed_check(result, "ruff-lint")
         self.assertIn("FA102", result.stdout + result.stderr)
 
-    def test_missing_ruff_skips_ruff_lint(self):
+    def test_missing_ruff_fails_ruff_lint(self):
         repo = self.fixture()
         controlled = os.path.join(self.base, "path without ruff")
         os.makedirs(controlled)
@@ -214,12 +214,8 @@ class CheckScript(unittest.TestCase):
                     continue
                 os.symlink(source, target)
         result = self.run_check(repo, env=self.environment("/tmp", PATH=controlled))
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertRegex(
-            result.stdout,
-            r"(?m)^SKIP ruff-lint \(ruff is not available\)$",
-        )
-        self.assert_statuses(result)
+        self.assert_failed_check(result, "ruff-lint")
+        self.assertIn("ruff is not on PATH", result.stderr)
 
     def test_missing_required_script_is_a_failure(self):
         repo = self.fixture()
@@ -245,7 +241,7 @@ class CheckScript(unittest.TestCase):
                 except OSError:
                     continue
                 seen.add(name)
-        for name in ("python3", "git", "npm", "node"):
+        for name in ("python3", "git", "npm", "node", "ruff"):
             source = shutil.which(name)
             if source and name not in seen:
                 os.symlink(source, os.path.join(controlled, name))

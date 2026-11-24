@@ -77,7 +77,7 @@ Current values in `stack.conf`:
 
 | Component | Configuration |
 | --- | --- |
-| Homebrew formulas | `git gh uv jq python@3.13` |
+| Homebrew formulas | `git gh uv jq python@3.13 ruff` |
 | Node / nvm | Node `24`, nvm `v0.40.3` |
 | Agent CLIs | `@anthropic-ai/claude-code@2.1.331`, `@openai/codex@0.172.0`, `@google/gemini-cli@0.71.1` |
 | OpenClaw | `openclaw@2026.9.6` |
@@ -350,7 +350,7 @@ There is no CI workflow or coverage report. `tests/` holds `unittest` tests for 
 - `test_restore.py`: `restore --dry-run` writes nothing, with or without `--overwrite`.
 - `test_openclaw_restore.py`: `openclaw-restore` success, refused members, checksum checks, archives without an `openclaw` directory and staging cleanup.
 
-They use temporary home folders, fake `security`, `curl`, token and `openclaw` commands and a fake GitHub API, so they need neither the Keychain nor the network. Fake secret values are assembled at runtime so the test sources pass the scan. Run the repository checks with Bash, a POSIX shell, Git, OpenSSL, Python 3.9 or newer, Node 22 or newer and npm. The runner finds the repository from its own path, including when called from another directory or from a checkout path containing spaces.
+They use temporary home folders, fake `security`, `curl`, token and `openclaw` commands and a fake GitHub API, so they need neither the Keychain nor the network. Fake secret values are assembled at runtime so the test sources pass the scan. Run the repository checks with Bash, a POSIX shell, Git, OpenSSL, Python 3.9 or newer, ruff, Node 22 or newer and npm. The runner finds the repository from its own path, including when called from another directory or from a checkout path containing spaces.
 
 ```sh
 sh scripts/check.sh
@@ -369,7 +369,7 @@ sh scripts/check.sh
 - `plugin-tests`: run the GitHub event router Node tests.
 - `diff-check`: check the working tree diff for whitespace errors.
 
-The runner creates temporary storage from the explicit `/tmp/ecc-check.XXXXXX` template instead of trusting an inherited `TMPDIR`. It disables Python bytecode writes, places the npm cache inside that storage, and removes the storage on normal exit or a catchable termination signal. Every check gets a status line even after an earlier failure. The final exit is 1 when any check failed and 0 otherwise. `plist-lint` prints `SKIP` with an explanation only when `plutil` is absent, and `ruff-lint` only when `ruff` is not on `PATH`; an installed `plutil` or `ruff` that returns nonzero produces `FAIL`. With ruff installed, `pyproject.toml` (lint settings only, `target-version = "py39"`) makes it report annotations such as `X | None` that need `from __future__ import annotations` on Python 3.9. Missing scripts and failed prerequisites are not skipped.
+The runner creates temporary storage from the explicit `/tmp/ecc-check.XXXXXX` template instead of trusting an inherited `TMPDIR`. It disables Python bytecode writes, places the npm cache inside that storage, and removes the storage on normal exit or a catchable termination signal. Every check gets a status line even after an earlier failure. The final exit is 1 when any check failed and 0 otherwise. `plist-lint` prints `SKIP` with an explanation only when `plutil` is absent; an installed `plutil` that returns nonzero produces `FAIL`. `ruff-lint` needs `ruff` on `PATH` (the `brew` step installs it) and fails without it. `pyproject.toml` (lint settings only, `target-version = "py39"`) makes it report annotations such as `X | None` that need `from __future__ import annotations` on Python 3.9. Missing scripts and failed prerequisites are not skipped.
 
 To check that the suite does not depend on the temporary folder location, run it under a disposable `HOME` with `TMPDIR=/tmp` and with `TMPDIR` set to that home's nested `.openclaw/tmp`. Run it with the system Python too, which checks Python 3.9 compatibility on macOS:
 
