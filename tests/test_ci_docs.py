@@ -122,6 +122,13 @@ class CheckWorkflow(unittest.TestCase):
             with self.subTest(line=line):
                 self.assertRegex(line, PINNED_ACTION)
 
+    def test_only_pull_request_runs_are_cancelled(self):
+        self.assertEqual(self.sections["concurrency"], [
+            "concurrency:",
+            "  group: check-${{ github.ref }}",
+            "  cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
+        ])
+
     def test_node_version_matches_stack(self):
         documented = re.findall(r"^          node-version: '([^']+)'$",
                                 self.workflow, re.MULTILINE)
