@@ -1,0 +1,11 @@
+# Lint settings only; this repository is not a Python package.
+# scripts/check.sh runs `ruff check` with these settings when ruff is installed.
+
+[tool.ruff]
+# The Python floor in AGENTS.md. FA102 then reports `X | None` and other
+# PEP 604 or PEP 585 annotations that would fail at import on Python 3.9
+# without `from __future__ import annotations`.
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "FA"]

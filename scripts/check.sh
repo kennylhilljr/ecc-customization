@@ -85,6 +85,10 @@ python_syntax() {
     python3 -c "import ast; ast.parse(open('lib/ecctools.py').read()); ast.parse(open('lib/gh_command_drain.py').read())"
 }
 
+ruff_lint() {
+    ruff check --no-cache --quiet .
+}
+
 plugin_tests() {
     (CDPATH= cd openclaw-plugins/github-event-router && npm test)
 }
@@ -93,6 +97,11 @@ run_check unit-tests python3 -m unittest discover -s tests
 run_check bash-syntax bash_syntax
 run_check sh-syntax sh_syntax
 run_check python-syntax python_syntax
+if command -v ruff >/dev/null 2>&1; then
+    run_check ruff-lint ruff_lint
+else
+    printf 'SKIP ruff-lint (ruff is not available)\n'
+fi
 run_check ecctools-help python3 lib/ecctools.py --help
 run_check kit-help bin/ecc-kit new --help
 run_check bootstrap-help ./bootstrap.sh --help

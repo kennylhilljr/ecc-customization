@@ -6,8 +6,11 @@
 # one read-only with the same prompt prbot uses, and the review is posted as
 # claude[bot] through the Claude GitHub App.
 #
-# Installed into a repo as .github/workflows/backup-review.yml by
-# integrations/github-actions/install-backup-review.sh.
+# This is a copy. The source is integrations/github-actions/backup-review.yml in
+# kennylhilljr/pr-review-bots, and that repository's
+# integrations/github-actions/install-backup-review.sh rolls it out here. Change
+# the source and rerun the installer rather than editing this copy by hand.
+# Dependabot (.github/dependabot.yml) proposes updates to the pinned action SHAs.
 
 name: Backup review
 
@@ -83,7 +86,7 @@ jobs:
       matrix:
         pr: ${{ fromJSON(needs.find.outputs.prs) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           ref: ${{ matrix.pr.sha }}
           fetch-depth: 0
@@ -108,7 +111,7 @@ jobs:
 
       - id: claude
         if: env.SKIP != '1'
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@469588f42e6b1e94cd14ad09dccfeaec772ce0fd # v1.0.280
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: |

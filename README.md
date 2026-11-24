@@ -79,12 +79,12 @@ Current values in `stack.conf`:
 | --- | --- |
 | Homebrew formulas | `git gh uv jq python@3.13` |
 | Node / nvm | Node `24`, nvm `v0.40.3` |
-| Agent CLIs | `@anthropic-ai/claude-code@latest`, `@openai/codex@latest`, `@google/gemini-cli@latest` |
+| Agent CLIs | `@anthropic-ai/claude-code@2.1.331`, `@openai/codex@0.172.0`, `@google/gemini-cli@0.71.1` |
 | OpenClaw | `openclaw@2026.9.6` |
 | ECC plugin | Marketplace `affaan-m/ECC`, plugin `ecc@ecc`; Claude user scope and Codex installation |
 | Certification runners | `claude,codex,gemini` |
 
-The stack is **partly pinned**: the three agent CLIs track `latest`, and the plugin and repository updates are not locked to commit SHAs. Gemini uses repository skills rather than an ECC plugin installation in the bootstrap.
+The stack is **partly pinned**: the npm CLIs, OpenClaw and nvm are exact versions, but the Homebrew installer comes from its `HEAD` (the method Homebrew documents), Homebrew formulas and Node `24` resolve to their current releases, Claude Code may update itself after install, and the plugin and repository updates are not locked to commit SHAs. Gemini uses repository skills rather than an ECC plugin installation in the bootstrap.
 
 ## Quick start
 
@@ -360,6 +360,7 @@ sh scripts/check.sh
 - `bash-syntax`: parse each Bash input separately.
 - `sh-syntax`: parse each POSIX shell script separately.
 - `python-syntax`: parse both Python helpers with `ast`.
+- `ruff-lint`: run `ruff check` with the Python 3.9 settings in `pyproject.toml`.
 - `ecctools-help`: exercise the helper entry point.
 - `kit-help`: exercise the kit wrapper help path.
 - `bootstrap-help`: exercise the safe bootstrap help path.
@@ -368,7 +369,7 @@ sh scripts/check.sh
 - `plugin-tests`: run the GitHub event router Node tests.
 - `diff-check`: check the working tree diff for whitespace errors.
 
-The runner creates temporary storage from the explicit `/tmp/ecc-check.XXXXXX` template instead of trusting an inherited `TMPDIR`. It disables Python bytecode writes, places the npm cache inside that storage, and removes the storage on normal exit or a catchable termination signal. Every check gets a status line even after an earlier failure. The final exit is 1 when any check failed and 0 otherwise. `plist-lint` prints `SKIP` with an explanation only when `plutil` is absent; an installed `plutil` that returns nonzero produces `FAIL`. Missing scripts and failed prerequisites are not skipped.
+The runner creates temporary storage from the explicit `/tmp/ecc-check.XXXXXX` template instead of trusting an inherited `TMPDIR`. It disables Python bytecode writes, places the npm cache inside that storage, and removes the storage on normal exit or a catchable termination signal. Every check gets a status line even after an earlier failure. The final exit is 1 when any check failed and 0 otherwise. `plist-lint` prints `SKIP` with an explanation only when `plutil` is absent, and `ruff-lint` only when `ruff` is not on `PATH`; an installed `plutil` or `ruff` that returns nonzero produces `FAIL`. With ruff installed, `pyproject.toml` (lint settings only, `target-version = "py39"`) makes it report annotations such as `X | None` that need `from __future__ import annotations` on Python 3.9. Missing scripts and failed prerequisites are not skipped.
 
 To check that the suite does not depend on the temporary folder location, run it under a disposable `HOME` with `TMPDIR=/tmp` and with `TMPDIR` set to that home's nested `.openclaw/tmp`. Run it with the system Python too, which checks Python 3.9 compatibility on macOS:
 

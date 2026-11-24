@@ -16,6 +16,7 @@ CHECK_DESCRIPTIONS = {
     "bash-syntax": r"each Bash input separately",
     "sh-syntax": r"each POSIX shell script separately",
     "python-syntax": r"both Python helpers with `ast`",
+    "ruff-lint": r"`ruff check` .*Python 3\.9",
     "ecctools-help": r"helper entry point",
     "kit-help": r"kit wrapper help path",
     "bootstrap-help": r"safe bootstrap help path",
