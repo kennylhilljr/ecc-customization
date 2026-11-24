@@ -76,7 +76,8 @@ class CheckScript(unittest.TestCase):
         paths = set(result.stdout.decode().rstrip("\0").split("\0"))
         paths.discard("")
         paths.discard("tests/test_check_script.py")
-        for extra in ("scripts/check.sh", "docs/ci.md", "tests/test_ci_docs.py"):
+        for extra in ("scripts/check.sh", "docs/ci.md", "tests/test_ci_docs.py",
+                      ".github/workflows/check.yml"):
             if os.path.isfile(os.path.join(ROOT, extra)):
                 paths.add(extra)
         for rel in sorted(paths):

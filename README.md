@@ -340,9 +340,9 @@ The Python restore refuses an existing destination and unsafe archive members (a
 python3 tests/test_ecc_operator.py
 ```
 
-Kenny can install the check workflow using the YAML and instructions in [docs/ci.md](docs/ci.md).
+`.github/workflows/check.yml` runs `sh scripts/check.sh` for every pull request and push to `main` on macOS with Python 3.9 and 3.13; [docs/ci.md](docs/ci.md) describes it.
 
-There is no CI workflow or coverage report. `tests/` holds `unittest` tests for the `ops` step, `merge-settings`, `openclaw-gh-app-token`, `openclaw-gh-command-drain` (`tests/test_gh_command_drain.py`) and the check runner, and for these `lib/ecctools.py` helpers:
+There is no coverage report. `tests/` holds `unittest` tests for the `ops` step, `merge-settings`, `openclaw-gh-app-token`, `openclaw-gh-command-drain` (`tests/test_gh_command_drain.py`) and the check runner, and for these `lib/ecctools.py` helpers:
 
 - `test_scan.py`: every token shape, the long opaque string rule (hex SHAs and single-case strings are not flagged), line numbers, skipped `.git` folders, skipped symlinks met during a folder walk, skipped binary files and the `scan` CLI output and exit codes. A symlink passed directly to `scan` is still scanned.
 - `test_scrubbing.py`: what `scrub_json` and `scrub_toml` remove and report. In JSON, harmless `SAFE_KEYS` values and booleans or `null` under secret-named keys are kept. TOML scrubbing is stricter: it also drops `authType` and secret-named booleans.

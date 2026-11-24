@@ -1,7 +1,7 @@
-"""Read-only checks for the workflow Kenny will install.
+"""Read-only checks for the check workflow and the documents that describe it.
 
-Compare the small YAML example's indented sections directly, without a YAML
-dependency. Exact lines enforce nesting, quoting and the allowed keys/steps.
+Compare the workflow's indented sections directly, without a YAML dependency.
+Exact lines enforce nesting, quoting and the allowed keys/steps.
 Paths are relative to this file so these tests also run in check-runner copies.
 """
 
@@ -11,6 +11,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parent.parent
+WORKFLOW = ".github/workflows/check.yml"
 CHECK_DESCRIPTIONS = {
     "unit-tests": r"isolated Python test suite",
     "bash-syntax": r"each Bash input separately",
@@ -25,6 +26,10 @@ CHECK_DESCRIPTIONS = {
     "plugin-tests": r"GitHub event router Node tests",
     "diff-check": r"working tree diff for whitespace errors",
 }
+PINNED_ACTION = re.compile(
+    r"^ +- uses: (?P<action>[a-z-]+/[a-z-]+)@(?P<sha>[0-9a-f]{40})"
+    r" # (?P<tag>v\d+\.\d+\.\d+)$"
+)
 
 
 def markdown_section(text, heading):
@@ -39,25 +44,13 @@ def markdown_section(text, heading):
     return match.group(1)
 
 
-class CIDocs(unittest.TestCase):
+class CheckWorkflow(unittest.TestCase):
     def setUp(self):
-        self.document = (ROOT / "docs/ci.md").read_text(encoding="utf-8")
-        blocks = re.findall(
-            r"^```yaml\n(.*?)^```$",
-            self.document,
-            flags=re.MULTILINE | re.DOTALL,
-        )
-        self.assertEqual(len(blocks), 1, "Expected exactly one YAML block")
-        self.assertEqual(
-            re.findall(r"^[ \t]*(?:`{3,}|~{3,}).*$", self.document, re.MULTILINE),
-            ["```yaml", "```"],
-            "The workflow must be the document's only fenced block",
-        )
-        self.workflow = blocks[0]
+        self.workflow = (ROOT / WORKFLOW).read_text(encoding="utf-8")
         self.sections = {}
         current = None
         for line in self.workflow.splitlines():
-            if not line.strip():
+            if not line.strip() or line.startswith("#"):
                 continue
             self.assertNotIn("\t", line)
             if not line.startswith(" "):
@@ -71,7 +64,10 @@ class CIDocs(unittest.TestCase):
                 self.sections[current].append(line)
 
     def test_top_level_keys(self):
-        self.assertEqual(set(self.sections), {"name", "on", "permissions", "jobs"})
+        self.assertEqual(
+            set(self.sections),
+            {"name", "on", "permissions", "concurrency", "jobs"},
+        )
         self.assertEqual(self.sections["name"], ["name: Repository checks"])
 
     def test_events_and_main_push_restriction(self):
@@ -90,27 +86,41 @@ class CIDocs(unittest.TestCase):
         ])
 
     def test_job_matrix_actions_inputs_and_final_command(self):
-        self.assertEqual(self.sections["jobs"], [
+        steps = [
+            PINNED_ACTION.sub(r"      - uses: \g<action>", line)
+            for line in self.sections["jobs"]
+        ]
+        self.assertEqual(steps, [
             "jobs:",
             "  check:",
             "    runs-on: macos-latest",
+            "    timeout-minutes: 30",
             "    strategy:",
             "      fail-fast: false",
             "      matrix:",
             "        python-version: ['3.9', '3.13']",
             "    steps:",
-            "      - uses: actions/checkout@v4",
+            "      - uses: actions/checkout",
             "        with:",
             "          persist-credentials: false",
-            "      - uses: actions/setup-python@v5",
+            "      - uses: actions/setup-python",
             "        with:",
             "          python-version: ${{ matrix.python-version }}",
-            "      - uses: actions/setup-node@v4",
+            "      - uses: actions/setup-node",
             "        with:",
             "          node-version: '24'",
+            "          package-manager-cache: false",
             "      - run: python -m pip install ruff==0.15.1",
             "      - run: sh scripts/check.sh",
         ])
+
+    def test_every_action_is_pinned_to_a_full_sha(self):
+        uses = [line for line in self.workflow.splitlines()
+                if re.match(r"^\s*-?\s*uses:", line)]
+        self.assertEqual(len(uses), 3)
+        for line in uses:
+            with self.subTest(line=line):
+                self.assertRegex(line, PINNED_ACTION)
 
     def test_node_version_matches_stack(self):
         documented = re.findall(r"^          node-version: '([^']+)'$",
@@ -122,30 +132,39 @@ class CIDocs(unittest.TestCase):
         self.assertEqual(len(configured), 1)
         self.assertEqual(documented, configured)
 
-    def test_installation_explanation_and_forbidden_content(self):
+    def test_forbidden_workflow_content(self):
+        self.assertNotRegex(self.workflow, r"(?i)\bsecrets\s*[.\[]")
+        self.assertNotIn("pull_request_target", self.workflow)
+        self.assertNotRegex(self.workflow, r"(?i)\bwrite(?:-all)?\b")
+        self.assertNotRegex(self.workflow, r"(?i)^\s*cache:")
+
+
+class CIDocs(unittest.TestCase):
+    def setUp(self):
+        self.document = (ROOT / "docs/ci.md").read_text(encoding="utf-8")
+
+    def test_explanation_and_forbidden_content(self):
         for required in (
-            "Kenny", "save", "`.github/workflows/check.yml`", "Node 24",
-            "`NODE_VERSION`", "`stack.conf`", "macOS", "`plutil`",
-            "`/bin/bash`", "Bash 3.2",
+            "`.github/workflows/check.yml`", "`sh scripts/check.sh`",
+            "Python 3.9", "Python 3.13", "Node 24", "`NODE_VERSION`",
+            "`stack.conf`", "macOS", "`plutil`", "`/bin/bash`", "Bash 3.2",
+            "commit SHA",
         ):
             with self.subTest(required=required):
                 self.assertIn(required, self.document)
-        self.assertNotRegex(self.document, r"[\u2013\u2014]")
-        self.assertNotRegex(self.document, r"(?i)\bsecrets\s*[.\[]")
-        self.assertNotIn("pull_request_target", self.workflow)
-        self.assertNotRegex(self.workflow, r"(?i)\b(?:cache|write-all)\b")
+        self.assertNotRegex(self.document, r"[–—]")
+        self.assertNotIn("Kenny", self.document)
+        self.assertNotRegex(self.document, r"^[ \t]*(?:`{3,}|~{3,})")
 
     def test_check_documentation(self):
-        for filename, heading, no_ci in (
-            ("AGENTS.md", "Checks",
-             "There is no CI workflow, bats setup or shellcheck config."),
-            ("README.md", "Testing", "There is no CI workflow or coverage report."),
-        ):
+        for filename, heading in (("AGENTS.md", "Checks"), ("README.md", "Testing")):
             with self.subTest(filename=filename):
                 section = markdown_section(
                     (ROOT / filename).read_text(encoding="utf-8"), heading,
                 )
-                self.assertIn(no_ci, section)
+                self.assertNotIn("There is no CI workflow", section)
+                self.assertNotIn("Kenny", section)
+                self.assertIn("`.github/workflows/check.yml`", section)
                 self.assertIn("```sh\nsh scripts/check.sh\n```", section)
                 checks = re.findall(r"^- `([-a-z]+)`: (.+)$", section, re.MULTILINE)
                 self.assertEqual([name for name, _ in checks], list(CHECK_DESCRIPTIONS))
