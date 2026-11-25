@@ -125,6 +125,8 @@ s_brew() {
   step "brew: Homebrew and $BREW_FORMULAS"
   if ! load_brew; then
     confirm "Install Homebrew (official installer)?" || { owner "install Homebrew, then rerun"; return; }
+    # The installer from HEAD is the method Homebrew documents (https://brew.sh);
+    # it has no tagged release to pin. nvm below is pinned to NVM_VERSION.
     # shellcheck disable=SC2016
     run /bin/bash -c '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
     load_brew || [ $DRY -eq 1 ] || die "Homebrew did not install"

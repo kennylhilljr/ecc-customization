@@ -31,9 +31,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
+      - run: python -m pip install ruff==0.15.1
       - run: sh scripts/check.sh
 ```
 
 Once installed, the workflow runs for pull requests and pushes to `main`. Each Python version runs the full check script. With `fail-fast: false`, a failure in one matrix job does not cancel the other.
 
-Node 24 matches `NODE_VERSION` in `stack.conf`. macOS supplies `plutil` for the property list checks and `/bin/bash` for the Bash 3.2 syntax checks. Keep the documented Node version in sync when changing `NODE_VERSION`.
+Node 24 matches `NODE_VERSION` in `stack.conf`. macOS supplies `plutil` for the property list checks and `/bin/bash` for the Bash 3.2 syntax checks. Keep the documented Node version in sync when changing `NODE_VERSION`. The `ruff-lint` check needs `ruff`, which macOS runners do not include, so the workflow installs a pinned version with pip.

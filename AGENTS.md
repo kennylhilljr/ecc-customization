@@ -5,6 +5,8 @@ This file is for agents changing this repository. The files in `kit/` (`kit/AGEN
 ## Layout
 
 - `bootstrap.sh`: the macOS install steps, run in the order listed in `ALL_STEPS`.
+- `pyproject.toml`: ruff lint settings only (target Python 3.9); the repository is not a Python package.
+- `.github/workflows/backup-review.yml`: a copy of the backup PR review workflow from `kennylhilljr/pr-review-bots`, rolled out by that repository's installer; change it there. `.github/dependabot.yml` proposes updates to its pinned action SHAs.
 - `stack.conf`: versions, repository names, paths and Keychain item names. `bootstrap.sh`, `bin/ecc` and `bin/ecc-snapshot` source it as shell; `lib/ecctools.py` reads `ECC_RUNTIME_DIR` and `ECC_STATE_DIR` from it.
 - `bin/`: POSIX `sh` wrappers. `ecc` delegates to the external orchestrator, `ecc-kit` calls `lib/ecctools.py kit-*`, `ecc-snapshot` calls `lib/ecctools.py snapshot`, `openclaw-gh-command-drain` calls `lib/gh_command_drain.py`. `openclaw-gh-app-token` is bash (it uses process substitution to keep the private key off disk); the `ops` step installs it into `~/.local/bin` with the App ids from `stack.conf` filled in.
 - `lib/ecctools.py`: every helper (kit, snapshot, restore, OpenClaw restore and plugin, settings merge, secret scan).
@@ -18,7 +20,7 @@ This file is for agents changing this repository. The files in `kit/` (`kit/AGEN
 
 ## Checks
 
-There is no CI workflow, bats setup or shellcheck config. Run the repository checks after a change. They require Bash, a POSIX shell, Git, OpenSSL, Python 3.9 or newer, Node 22 or newer and npm. The script resolves the repository from its own location, so it also works when invoked through an absolute or relative path from another directory.
+There is no CI workflow, bats setup or shellcheck config. Run the repository checks after a change. They require Bash, a POSIX shell, Git, OpenSSL, Python 3.9 or newer, ruff, Node 22 or newer and npm. The script resolves the repository from its own location, so it also works when invoked through an absolute or relative path from another directory.
 
 ```sh
 sh scripts/check.sh
@@ -28,6 +30,7 @@ sh scripts/check.sh
 - `bash-syntax`: parse each Bash input separately.
 - `sh-syntax`: parse each POSIX shell script separately.
 - `python-syntax`: parse both Python helpers with `ast`.
+- `ruff-lint`: run `ruff check` with the Python 3.9 settings in `pyproject.toml`.
 - `ecctools-help`: exercise the helper entry point.
 - `kit-help`: exercise the kit wrapper help path.
 - `bootstrap-help`: exercise the safe bootstrap help path.
@@ -36,7 +39,7 @@ sh scripts/check.sh
 - `plugin-tests`: run the GitHub event router Node tests.
 - `diff-check`: check the working tree diff for whitespace errors.
 
-The runner creates `/tmp/ecc-check.XXXXXX` storage without using the incoming `TMPDIR`, directs Python bytecode and the npm cache away from the checkout, and removes the storage on exit or a catchable termination signal. It prints one status for every check and continues after failures, then exits 1 if any check failed. `plist-lint` is skipped with an explanation only when `plutil` is unavailable; a failing `plutil` is a failed check. A missing required script or other prerequisite is also a failure.
+The runner creates `/tmp/ecc-check.XXXXXX` storage without using the incoming `TMPDIR`, directs Python bytecode and the npm cache away from the checkout, and removes the storage on exit or a catchable termination signal. It prints one status for every check and continues after failures, then exits 1 if any check failed. `plist-lint` is skipped with an explanation only when `plutil` is unavailable; a failing `plutil` is a failed check. `ruff-lint` needs `ruff` on `PATH` (`brew install ruff`; the bootstrap `brew` step installs it) and fails without it; with `target-version = "py39"` its `FA102` rule reports `X | None` style annotations that would break at import on Python 3.9. A missing required script or other prerequisite is also a failure.
 
 Claude Code also loads the project hooks in `.claude/settings.json`, both run by `.claude/hooks/check_edit.py`. Before a Bash command, `pre-bash` blocks the commands listed under "Do not run" below (exit 2 with the rule); after a Write, Edit or MultiEdit, `post-edit` runs the syntax check, matching test module and secret scan for that one file and reports failures without blocking. They are a guardrail against mistakes, not a security boundary; `tests/test_claude_hooks.py` covers them.
 

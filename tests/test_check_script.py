@@ -22,6 +22,7 @@ LABELS = [
     "bash-syntax",
     "sh-syntax",
     "python-syntax",
+    "ruff-lint",
     "ecctools-help",
     "kit-help",
     "bootstrap-help",
@@ -187,6 +188,35 @@ class CheckScript(unittest.TestCase):
         result = self.run_check(repo)
         self.assert_failed_check(result, "secret-scan")
 
+    @unittest.skipUnless(shutil.which("ruff"), "ruff is not installed")
+    def test_python39_incompatible_annotation_fails_ruff_lint(self):
+        repo = self.fixture()
+        path = os.path.join(repo, "lib", "pep604_probe.py")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("def probe(value: int | None) -> None:\n    return None\n")
+        result = self.run_check(repo)
+        self.assert_failed_check(result, "ruff-lint")
+        self.assertIn("FA102", result.stdout + result.stderr)
+
+    def test_missing_ruff_fails_ruff_lint(self):
+        repo = self.fixture()
+        controlled = os.path.join(self.base, "path without ruff")
+        os.makedirs(controlled)
+        for directory in os.environ["PATH"].split(os.pathsep):
+            if not os.path.isdir(directory):
+                continue
+            for name in os.listdir(directory):
+                source = os.path.join(directory, name)
+                target = os.path.join(controlled, name)
+                if name == "ruff" or os.path.lexists(target):
+                    continue
+                if not os.access(source, os.X_OK) or os.path.isdir(source):
+                    continue
+                os.symlink(source, target)
+        result = self.run_check(repo, env=self.environment("/tmp", PATH=controlled))
+        self.assert_failed_check(result, "ruff-lint")
+        self.assertIn("ruff is not on PATH", result.stderr)
+
     def test_missing_required_script_is_a_failure(self):
         repo = self.fixture()
         os.unlink(os.path.join(repo, "bin", "ecc-snapshot"))
@@ -211,7 +241,7 @@ class CheckScript(unittest.TestCase):
                 except OSError:
                     continue
                 seen.add(name)
-        for name in ("python3", "git", "npm", "node"):
+        for name in ("python3", "git", "npm", "node", "ruff"):
             source = shutil.which(name)
             if source and name not in seen:
                 os.symlink(source, os.path.join(controlled, name))
