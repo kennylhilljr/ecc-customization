@@ -1,40 +1,11 @@
-# Install the check workflow
+# Check workflow
 
-Kenny, save the YAML below as `.github/workflows/check.yml` at the repository root, then commit that file. This document supplies the workflow for you to install.
+`.github/workflows/check.yml` runs `sh scripts/check.sh` for every pull request and every push to `main`. It runs on macOS with Python 3.9 and Python 3.13. With `fail-fast: false`, a failure on one Python version does not cancel the other job. A new push to a pull request cancels that pull request's unfinished run; each push to `main` runs in its own concurrency group, so none is cancelled or replaced.
 
-```yaml
-name: Repository checks
+The workflow has read-only `contents` permission, does not keep the checkout credentials, uses no secrets and pins each action to a full commit SHA, with the release tag in a comment. To update an action, replace both the SHA and the tag comment.
 
-on:
-  pull_request:
-  push:
-    branches:
-      - main
+Node 24 matches `NODE_VERSION` in `stack.conf`. Keep the workflow's `node-version` in sync when changing `NODE_VERSION`. macOS supplies `plutil` for the property list checks and `/bin/bash` for the Bash 3.2 syntax checks.
 
-permissions:
-  contents: read
+The `ruff-lint` check needs `ruff`, which macOS runners do not include, so the workflow installs a pinned version with pip before running the script.
 
-jobs:
-  check:
-    runs-on: macos-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ['3.9', '3.13']
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-      - run: python -m pip install ruff==0.15.1
-      - run: sh scripts/check.sh
-```
-
-Once installed, the workflow runs for pull requests and pushes to `main`. Each Python version runs the full check script. With `fail-fast: false`, a failure in one matrix job does not cancel the other.
-
-Node 24 matches `NODE_VERSION` in `stack.conf`. macOS supplies `plutil` for the property list checks and `/bin/bash` for the Bash 3.2 syntax checks. Keep the documented Node version in sync when changing `NODE_VERSION`. The `ruff-lint` check needs `ruff`, which macOS runners do not include, so the workflow installs a pinned version with pip.
+`tests/test_ci_docs.py` checks the workflow file against these rules.

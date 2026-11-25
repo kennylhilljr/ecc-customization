@@ -20,7 +20,7 @@ This file is for agents changing this repository. The files in `kit/` (`kit/AGEN
 
 ## Checks
 
-There is no CI workflow, bats setup or shellcheck config. Run the repository checks after a change. They require Bash, a POSIX shell, Git, OpenSSL, Python 3.9 or newer, ruff, Node 22 or newer and npm. The script resolves the repository from its own location, so it also works when invoked through an absolute or relative path from another directory.
+`.github/workflows/check.yml` runs the repository checks for every pull request and push to `main` on macOS with Python 3.9 and 3.13 (see `docs/ci.md`). There is no bats setup or shellcheck config. Run the repository checks after a change. They require Bash, a POSIX shell, Git, OpenSSL, Python 3.9 or newer, ruff, Node 22 or newer and npm. The script resolves the repository from its own location, so it also works when invoked through an absolute or relative path from another directory.
 
 ```sh
 sh scripts/check.sh
