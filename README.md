@@ -302,7 +302,7 @@ ecc drive --run-id my-project-m0a
 ecc status --run-id my-project-m0a
 ```
 
-These commands are documented by the checked-in [operator skill](skills/ecc-operator/SKILL.md) and [run-guide template](kit/.orchestration/RUN-GUIDE.md); their implementation is external. `bin/ecc` searches upward for `.orchestration/ecc.json`, or accepts `--project DIR`, prepends nvm's default Node when resolvable, and on macOS delegates through the orchestrator's Keychain wrapper. It does not itself implement orchestration or credential loading.
+These commands are documented by the checked-in [operator skill](skills/ecc-operator/SKILL.md) and [run-guide template](kit/.orchestration/RUN-GUIDE.md); their implementation is external. `bin/ecc` searches upward for `.orchestration/ecc.json`, or accepts `--project DIR`, prepends nvm's default Node when resolvable, and on macOS delegates through the orchestrator's Keychain wrapper. It does not itself implement orchestration or credential loading. `ecc --help` (or `-h`) on its own prints the wrapper's usage and exits 0 without a project, Node or Keychain access, so command-presence checks succeed anywhere; `ecc <command> --help` still reaches the orchestrator.
 
 ### Capture and restore selected settings
 

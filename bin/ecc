@@ -10,7 +10,28 @@
 #   ecc --project ~/Documents/GitHub/research-mcp drive --run-id rm-m0a
 #
 # Put this folder on PATH (bootstrap.sh prints how) or alias it.
+#
+# `ecc --help` (or `-h`) as the only argument prints this usage and exits 0
+# without a project, Node or Keychain access, so `--help` probes work
+# anywhere. `ecc <command> --help` still reaches the orchestrator.
 set -u
+
+if [ $# -eq 1 ] && { [ "$1" = "--help" ] || [ "$1" = "-h" ]; }; then
+  cat <<'EOF'
+usage: ecc [--project DIR] <command> [args...]
+
+Runs the ECC orchestrator CLI for one project. Without --project, the
+project is the nearest folder at or above the current one that has
+.orchestration/ecc.json. Provider keys come from the Keychain.
+
+Examples:
+  ecc status --run-id rm-m0a
+  ecc --project ~/Documents/GitHub/research-mcp drive --run-id rm-m0a
+
+Run `ecc <command> --help` inside a project for a command's options.
+EOF
+  exit 0
+fi
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 . "$HERE/stack.conf"
 ORCH="$GITHUB_DIR/$ORCH_REPO"
