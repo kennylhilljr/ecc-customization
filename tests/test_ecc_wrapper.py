@@ -1,7 +1,6 @@
 """bin/ecc help path: runs with a temporary HOME and no project or orchestrator."""
 
 from pathlib import Path
-import os
 import subprocess
 import tempfile
 import unittest
