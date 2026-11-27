@@ -6,6 +6,12 @@
 #                                          build (or check) ECC plan JSON from a plan's task table
 # Options for new: --slug --spec --prd --test-plan --setup --test-cmd --gate
 #   --fast-gate --milestone --run-id --force   (python3 lib/ecctools.py kit-new --help)
+#
+# `ecc-kit --help` (or `-h`) as the only argument prints this usage and exits
+# 0, so `--help` probes succeed. No command or an unknown one still exits 2.
+if [ $# -eq 1 ] && { [ "$1" = "--help" ] || [ "$1" = "-h" ]; }; then
+  sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 0
+fi
 HERE=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cmd=${1:-}; [ $# -gt 0 ] && shift
 case "$cmd" in
