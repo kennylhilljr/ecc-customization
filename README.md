@@ -242,6 +242,8 @@ bin/ecc-kit diff ../my-project
 bin/ecc-kit sync ../my-project
 ```
 
+`ecc-kit --help` (or `-h`) on its own prints the subcommand list and exits 0; with no command or an unknown one it prints the same list and exits 2.
+
 `diff` shows kit lines as `-` and project lines as `+`. `sync` updates missing files and files whose hashes still match their recorded baseline; it reports locally evolved files for manual reconciliation.
 
 ### Generate a milestone plan JSON
